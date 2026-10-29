@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, ArrowDownToLine, ArrowLeftRight, ArrowRight, Box, Camera, Check,
-  ChevronRight, CircleHelp, Focus, Grid2X2, Info,
+  ChevronDown, ChevronRight, CircleHelp, Focus, Grid2X2, Info,
   LayoutDashboard, LoaderCircle, MousePointer2, PawPrint, Plus, Minus, Power, RefreshCw,
   RotateCcw, ScanLine, Settings2, ShieldCheck, SlidersHorizontal, Sparkles,
   TriangleAlert, Video, X,
@@ -17,15 +17,16 @@ import { useStereo } from './hooks/useStereo';
 import { createDemoCloud } from './lib/demo';
 import { downloadPly } from './lib/export';
 import { describeHamsterPosition } from './lib/hamster';
+import { C930E, C930E_CROP_FOV_DEG, describeGeometry, depthFromDisparity, isC930e } from './lib/c930e';
 import { describeSetupReason } from './lib/stitch';
 import type { CameraOrder } from './lib/stereo';
 
 type SourceMode = 'demo' | 'live';
 type ViewMode = 'combined' | 'dual' | 'depth3d' | 'hamster';
-type DepthSub = 'cloud' | 'map';
+type DepthSub = 'cloud' | 'map' | 'disparity';
 type ColorMode = 'depth' | 'rgb';
 
-const defaults = { baselineCm: 6.5, horizontalFov: 60, maxDepthM: 8 };
+const defaults = { baselineCm: 6.5, horizontalFov: 60, maxDepthM: 8, cameraPreset: 'c930e' as 'c930e' | 'manual' };
 function matchesLabel(count: number) {
   const lastTwo = count % 100;
   const word = lastTwo >= 11 && lastTwo <= 14 ? 'совпадений' : count % 10 === 1 ? 'совпадение' : count % 10 >= 2 && count % 10 <= 4 ? 'совпадения' : 'совпадений';
@@ -39,6 +40,7 @@ function initialSettings() {
       baselineCm: valid(stored.baselineCm, 1, 200, defaults.baselineCm),
       horizontalFov: valid(stored.horizontalFov, 20, 150, defaults.horizontalFov),
       maxDepthM: valid(stored.maxDepthM, 1, 30, defaults.maxDepthM),
+      cameraPreset: stored.cameraPreset === 'manual' ? 'manual' as const : defaults.cameraPreset,
     };
   } catch { return defaults; }
 }
@@ -114,7 +116,14 @@ function App() {
   const [gridVisible, setGridVisible] = useState(true);
   const [guideOpen, setGuideOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
-  const stereo = useStereo({ slots: cameras.slots, videoA, videoB, active: source === 'live', ...settings });
+  // The video pipeline: f comes from the camera FOV (C930e by default),
+  // B is the one measured baseline, Z = f * B / d.
+  const effectiveFov = settings.cameraPreset === 'c930e' ? C930E_CROP_FOV_DEG : settings.horizontalFov;
+  const stereo = useStereo({ slots: cameras.slots, videoA, videoB, active: source === 'live', baselineCm: settings.baselineCm, horizontalFov: effectiveFov, maxDepthM: settings.maxDepthM });
+  const geometry = describeGeometry(stereo.perf.workWidth, effectiveFov, settings.baselineCm);
+  const measuredDisparity = stereo.pairMetrics?.disparityMedian ?? 0;
+  const measuredDepth = measuredDisparity >= 1 ? depthFromDisparity(geometry.focalPx, geometry.baselineM, measuredDisparity) : null;
+  const pairIsC930e = isC930e(cameras.slots.a?.label) && isC930e(cameras.slots.b?.label);
   const cameraCount = Number(!!cameras.slots.a) + Number(!!cameras.slots.b);
   const pairReady = cameraCount === 2;
   const cloud = source === 'demo' ? demoCloud : stereo.cloud;
@@ -228,7 +237,7 @@ function App() {
         <div className="content" id="overview">
           <div className="mobile-brand"><Brand /></div>
           <section className="intro">
-            <div><div className="eyebrow intro-eyebrow"><span className="accent-line" /> ВАША РАБОЧАЯ ОБЛАСТЬ</div><div className="title-row"><h1>Стереопространство</h1><span className="beta-badge">BETA</span></div><p>Две камеры. Один совмещённый видеопоток.</p></div>
+            <div><div className="eyebrow intro-eyebrow"><span className="accent-line" /> ВАША РАБОЧАЯ ОБЛАСТЬ</div><div className="title-row"><h1>Стереопространство</h1><span className="beta-badge">BETA</span></div><p>Две Logitech C930e. Один совмещённый поток и стереоглубина Z = f × B / d.</p></div>
             <div className="intro-actions">
               {pairReady && <button className="secondary-button auto-setup-intro" onClick={() => { setSource('live'); stereo.detectAgain(); }} disabled={cameras.busy || stereo.status === 'detecting'}><ScanLine size={16} /> {stereo.status === 'detecting' ? 'Настраиваем...' : 'Автонастройка'}</button>}
               {cameraCount === 2 ? <button className="secondary-button disconnect-button" onClick={disconnect} disabled={cameras.busy}><Power size={16} /> Отключить камеры</button> : <>{cameraCount === 1 && <button className="secondary-button stop-one-button" onClick={disconnect} disabled={cameras.busy} title="Отключить камеру" aria-label="Отключить камеру"><Power size={16} /></button>}<button className="primary-button connect-button" onClick={connect} disabled={cameras.busy}>{cameras.busy ? <LoaderCircle size={17} className="spin" /> : <Camera size={17} />} {cameras.busy ? 'Подключаем...' : cameraCount === 1 ? 'Переподключить камеры' : 'Подключить камеры'} {!cameras.busy && <ArrowRight size={16} />}</button></>}
@@ -249,7 +258,7 @@ function App() {
 
               <div className="viewer-frame">
                 <div className="viewer-toolbar">
-                  <div className="viewer-caption"><span className="viewer-caption-icon"><Box size={15} /></span><span>ПРОСМОТР СЦЕНЫ</span><span className="caption-divider" /><span className="viewer-subcaption">{view === 'combined' ? 'Один совмещённый поток' : view === 'dual' ? 'Исходные потоки' : view === 'depth3d' ? (depthSub === 'cloud' ? 'Облако точек' : 'Карта глубины') : 'Наблюдение за хомяком'}</span></div>
+                  <div className="viewer-caption"><span className="viewer-caption-icon"><Box size={15} /></span><span>ПРОСМОТР СЦЕНЫ</span><span className="caption-divider" /><span className="viewer-subcaption">{view === 'combined' ? 'Один совмещённый поток' : view === 'dual' ? 'Исходные потоки' : view === 'depth3d' ? (depthSub === 'cloud' ? 'Облако точек' : depthSub === 'map' ? 'Карта глубины Z' : 'Карта диспарити d') : 'Наблюдение за хомяком'}</span></div>
                   <div className="view-tabs" role="group" aria-label="Режим просмотра">
                     <button className={view === 'combined' ? 'selected' : ''} onClick={() => setView('combined')}>Общий вид</button>
                     <button className={view === 'dual' ? 'selected' : ''} onClick={() => setView('dual')}>Две камеры</button>
@@ -257,7 +266,7 @@ function App() {
                     <button className={view === 'hamster' ? 'selected' : ''} onClick={() => setView('hamster')}>Хомяк</button>
                   </div>
                 </div>
-                <div className={`visualization ${view === 'depth3d' && depthSub === 'map' ? 'show-depth' : ''}`}>
+                <div className={`visualization ${view === 'depth3d' && depthSub !== 'cloud' ? 'show-depth' : ''}`}>
                   {view === 'combined' && source === 'live' && stereo.combined && (stereo.combineStatus === 'ready' || stereo.combineStatus === 'planar' || stereo.combineStatus === 'unreliable-depth') ? (
                     <CombinedView combined={stereo.combined} box={stereo.boxOnCombined} showBox={!!hamster} />
                   ) : view === 'combined' && source === 'live' ? (
@@ -265,7 +274,7 @@ function App() {
                   ) : view === 'dual' && source === 'live' ? (
                     <RawPair streamA={cameras.slots.a?.stream ?? null} streamB={cameras.slots.b?.stream ?? null} order={stereo.order} skewMs={stereo.perf.skewMs} />
                   ) : view === 'depth3d' ? (
-                    depthSub === 'cloud' ? <PointCloud ref={pointCloudRef} cloud={cloud} colorMode={colorMode} sceneKey={source === 'demo' ? 'demo' : `${cameras.slots.a?.id ?? ''}|${cameras.slots.b?.id ?? ''}`} /> : <DepthMap cloud={cloud} />
+                    depthSub === 'cloud' ? <PointCloud ref={pointCloudRef} cloud={cloud} colorMode={colorMode} sceneKey={source === 'demo' ? 'demo' : `${cameras.slots.a?.id ?? ''}|${cameras.slots.b?.id ?? ''}`} /> : <DepthMap cloud={cloud} mode={depthSub === 'disparity' ? 'disparity' : 'depth'} />
                   ) : view === 'hamster' && observation ? (
                     <HamsterFrame observation={observation} className="hamster-main-frame" />
                   ) : view === 'hamster' ? null : (
@@ -280,7 +289,7 @@ function App() {
                   {view === 'hamster' && observation && <div className="hamster-frame-caption"><span /> АНАЛИЗ КАДРА ЛЕВОЙ КАМЕРЫ</div>}
                   {source === 'demo' && pairReady && view !== 'hamster' && <button className="back-live" onClick={() => setSource('live')}>К камерам <ArrowRight size={13} /></button>}
                   {view === 'depth3d' && depthSub === 'cloud' && <div className="viewport-tools"><button title="Увеличить" aria-label="Увеличить" onClick={() => pointCloudRef.current?.zoomIn()}><Plus size={16} /></button><button title="Уменьшить" aria-label="Уменьшить" onClick={() => pointCloudRef.current?.zoomOut()}><Minus size={16} /></button><div /><button title="Сбросить ракурс" aria-label="Сбросить ракурс" onClick={() => pointCloudRef.current?.reset()}><RotateCcw size={15} /></button><button className={gridVisible ? 'tool-active' : ''} title={gridVisible ? 'Скрыть сетку' : 'Показать сетку'} aria-label={gridVisible ? 'Скрыть сетку' : 'Показать сетку'} onClick={() => setGridVisible(pointCloudRef.current?.toggleGrid() ?? false)}><Grid2X2 size={15} /></button></div>}
-                  {view === 'depth3d' && source === 'live' && hasLivePoints && <div className="depth-sub-switch" role="group" aria-label="Режим глубины"><button className={depthSub === 'cloud' ? 'selected' : ''} onClick={() => setDepthSub('cloud')}>Облако</button><button className={depthSub === 'map' ? 'selected' : ''} onClick={() => setDepthSub('map')}>Карта</button></div>}
+                  {view === 'depth3d' && source === 'live' && hasLivePoints && <div className="depth-sub-switch" role="group" aria-label="Режим глубины"><button className={depthSub === 'cloud' ? 'selected' : ''} onClick={() => setDepthSub('cloud')}>Облако</button><button className={depthSub === 'map' ? 'selected' : ''} onClick={() => setDepthSub('map')}>Глубина</button><button className={depthSub === 'disparity' ? 'selected' : ''} onClick={() => setDepthSub('disparity')}>Диспарити</button></div>}
 
                   {(view === 'combined' || view === 'dual') && source !== 'demo' && (
                     <div className={`merge-status ${statusInfo.tone}`} role="status">
@@ -297,10 +306,10 @@ function App() {
                   {source === 'demo' && view !== 'hamster' && <div className="scene-empty"><div className="scene-empty-icon"><ScanLine size={23} /></div><h3>Подключите две камеры</h3><p>Совмещённый вид строится только из реальных кадров. Демо-сцена не подменяет камеры.</p><button onClick={connect}>Подключить камеры <ArrowRight size={14} /></button></div>}
                   {view === 'hamster' && !observation && <div className="scene-empty hamster-empty"><div className="scene-empty-icon">{stereo.hamsterStatus === 'loading' && stereo.order ? <LoaderCircle size={23} className="spin" /> : <PawPrint size={23} />}</div><h3>{hamsterState}</h3><p>{hamsterHelp}</p>{source === 'demo' && pairReady && <button onClick={() => setSource('live')}>К камерам <ArrowRight size={14} /></button>}{stereo.hamsterStatus === 'error' && pairReady && !!stereo.order && <button onClick={stereo.retryHamster}>Повторить <RefreshCw size={14} /></button>}</div>}
                   {view === 'depth3d' && source === 'live' && !!stereo.cloud?.count && stereo.cloud.count < 70 && <div className="few-points"><TriangleAlert size={14} /> Мало совпадений — проверьте расположение камер</div>}
-                  {view === 'depth3d' && <div className="viewport-bottom"><div className="viewport-coordinates"><span className="crosshair">✳</span> {depthSub === 'cloud' ? 'СТЕРЕО / 3D' : 'СТЕРЕО / ГЛУБИНА'}</div><div className="depth-legend"><span>ДАЛЬШЕ</span><div /><span>БЛИЖЕ</span></div></div>}
+                  {view === 'depth3d' && <div className="viewport-bottom"><div className="viewport-coordinates"><span className="crosshair">✳</span> {depthSub === 'cloud' ? 'СТЕРЕО / 3D' : depthSub === 'map' ? 'СТЕРЕО / ГЛУБИНА' : 'СТЕРЕО / ДИСПАРИТИ'}</div><div className="depth-legend"><span>{depthSub === 'disparity' ? 'МАЛОЕ СМЕЩЕНИЕ' : 'ДАЛЬШЕ'}</span><div /><span>{depthSub === 'disparity' ? 'БОЛЬШОЕ СМЕЩЕНИЕ' : 'БЛИЖЕ'}</span></div></div>}
                 </div>
                 <div className="viewer-footer">
-                  <div className="viewer-hint"><MousePointer2 size={15} /><span>{view === 'combined' ? (stereo.combined?.mode === 'planar' ? 'Плоский режим — для плоских сцен' : 'Параллакс компенсируется по глубине') : view === 'dual' ? 'Исходные кадры без обработки' : view === 'depth3d' && depthSub === 'cloud' ? 'Перетащите, чтобы повернуть' : view === 'depth3d' ? 'Цвет показывает глубину' : 'Рамка относится к показанному кадру'}</span><span className="hint-dot">·</span><span className="hint-secondary">{view === 'combined' ? 'Нет данных — не заполняются' : view === 'dual' ? 'Для проверки подключения и перекрытия' : view === 'depth3d' && depthSub === 'cloud' ? 'Колесо — масштаб' : view === 'depth3d' ? 'Тёмные области — нет данных' : 'Анализ локально'}</span></div>
+                  <div className="viewer-hint"><MousePointer2 size={15} /><span>{view === 'combined' ? (stereo.combined?.mode === 'planar' ? 'Плоский режим — для плоских сцен' : 'Параллакс компенсируется по глубине') : view === 'dual' ? 'Исходные кадры без обработки' : view === 'depth3d' && depthSub === 'cloud' ? 'Перетащите, чтобы повернуть' : view === 'depth3d' && depthSub === 'disparity' ? 'd — смещение в пикселях: больше d — ближе объект' : view === 'depth3d' ? 'Цвет показывает глубину Z = f × B / d' : 'Рамка относится к показанному кадру'}</span><span className="hint-dot">·</span><span className="hint-secondary">{view === 'combined' ? 'Нет данных — не заполняются' : view === 'dual' ? 'Для проверки подключения и перекрытия' : view === 'depth3d' && depthSub === 'cloud' ? 'Колесо — масштаб' : view === 'depth3d' ? 'Тёмные области — нет данных' : 'Анализ локально'}</span></div>
                   {view === 'depth3d' && <div className="color-switch"><span>ЦВЕТ</span><button className={colorMode === 'depth' ? 'selected' : ''} onClick={() => setColorMode('depth')}>Глубина</button><button className={colorMode === 'rgb' ? 'selected' : ''} onClick={() => setColorMode('rgb')}>RGB</button></div>}
                 </div>
               </div>
@@ -326,7 +335,9 @@ function App() {
             </section>
 
             <aside className="control-column">
-              <section className="control-panel sources-panel" id="sources" aria-labelledby="sources-title"><div className="panel-heading"><div className="panel-title-group"><span className="panel-icon"><Video size={17} /></span><div><div className="panel-kicker">ИСТОЧНИКИ</div><h2 id="sources-title">Камеры</h2></div></div><span className={`count-badge ${pairReady ? 'complete' : ''}`}>{cameraCount} <span>/</span> 2</span></div><p className="panel-description">Два взгляда на одну сцену</p>
+              <section className="control-panel sources-panel" id="sources" aria-labelledby="sources-title"><div className="panel-heading"><div className="panel-title-group"><span className="panel-icon"><Video size={17} /></span><div><div className="panel-kicker">ИСТОЧНИКИ</div><h2 id="sources-title">Камеры</h2></div></div><span className={`count-badge ${pairReady ? 'complete' : ''}`}>{cameraCount} <span>/</span> 2</span></div><p className="panel-description">Две Logitech C930e — одна сцена</p>
+                <div className="camera-models"><span className={`model-chip ${isC930e(cameras.slots.a?.label) ? 'ok' : ''}`}>CAM 01 · {isC930e(cameras.slots.a?.label) ? 'Logitech C930e' : cameras.slots.a ? 'другая камера' : 'нет сигнала'}</span><span className={`model-chip ${isC930e(cameras.slots.b?.label) ? 'ok' : ''}`}>CAM 02 · {isC930e(cameras.slots.b?.label) ? 'Logitech C930e' : cameras.slots.b ? 'другая камера' : 'нет сигнала'}</span></div>
+                {pairReady && !pairIsC930e && <div className="profile-note warn">Геометрия по умолчанию рассчитана под Logitech C930e (90° dFOV, 82,1° по горизонтали). Для других камер включите ручной угол обзора в «Стерео-геометрии».</div>}
                 <div className="cameras-grid"><CameraFeed slot="a" camera={cameras.slots.a} otherId={cameras.slots.b?.id} devices={cameras.devices} videoRef={videoA} position={position('a')} busy={cameras.busy} observation={observation?.leftSlot === 'a' ? observation : null} onChange={cameras.changeCamera} /><CameraFeed slot="b" camera={cameras.slots.b} otherId={cameras.slots.a?.id} devices={cameras.devices} videoRef={videoB} position={position('b')} busy={cameras.busy} observation={observation?.leftSlot === 'b' ? observation : null} onChange={cameras.changeCamera} /></div>
                 {cameras.error && <div className="inline-error" role="alert"><TriangleAlert size={15} /><span>{cameras.error}</span><button aria-label="Скрыть сообщение" onClick={cameras.clearError}><X size={14} /></button></div>}
                 {stereo.processingError && <div className="inline-error" role="alert"><TriangleAlert size={15} /><span>{stereo.processingError}</span></div>}
@@ -346,7 +357,31 @@ function App() {
                   {pairReady && !stereo.order && stereo.status !== 'failed' && <button className="manual-link" onClick={() => setManualOpen(!manualOpen)}>{manualOpen ? 'Скрыть выбор' : 'Выбрать стороны вручную'}</button>}
                 </div>
               </section>
-              <section className="control-panel settings-panel" id="settings" aria-labelledby="settings-title"><div className="panel-heading"><div className="panel-title-group"><span className="panel-icon"><Settings2 size={17} /></span><div><div className="panel-kicker">НАСТРОЙКА</div><h2 id="settings-title">Геометрия пары</h2></div></div><span className="settings-tag">3D</span></div><p className="panel-description">Нужна для расчёта глубины</p><div className="parameter-grid"><ParamInput label="База камер" value={settings.baselineCm} min={1} max={200} suffix="см" description="Расстояние между центрами объективов. Без этого измерения расстояния в метрах недостоверны." onValue={(value) => setSettings((current) => ({ ...current, baselineCm: value }))} /><ParamInput label="Угол обзора" value={settings.horizontalFov} min={20} max={150} suffix="°" description="Горизонтальный угол обзора после кадрирования" onValue={(value) => setSettings((current) => ({ ...current, horizontalFov: value }))} /></div><div className="range-control"><div><label htmlFor="max-depth">Дальность сцены</label><strong>{settings.maxDepthM} м</strong></div><input id="max-depth" type="range" min="1" max="30" step="1" value={settings.maxDepthM} onChange={(event) => setSettings((current) => ({ ...current, maxDepthM: Number(event.target.value) }))} /><div className="range-labels"><span>1 м</span><span>30 м</span></div></div><div className="geometry-note\"><Info size={14} /><span>Измерьте расстояние между центрами объективов (базу) в сантиметрах — это единственное физическое измерение, которое нужно для глубины в метрах. Без него значения глубины недостоверны.</span></div></section>
+              <section className="control-panel settings-panel" id="settings" aria-labelledby="settings-title"><div className="panel-heading"><div className="panel-title-group"><span className="panel-icon"><Settings2 size={17} /></span><div><div className="panel-kicker">СТЕРЕО-ГЕОМЕТРИЯ</div><h2 id="settings-title">Z = f × B / d</h2></div></div><span className="settings-tag">C930e</span></div><p className="panel-description">Как в классической схеме стереозрения</p>
+                <div className="camera-preset">
+                  <label htmlFor="camera-preset">Камеры</label>
+                  <div className="select-wrap">
+                    <select id="camera-preset" value={settings.cameraPreset} onChange={(event) => setSettings((current) => ({ ...current, cameraPreset: event.target.value === 'manual' ? 'manual' : 'c930e' }))}>
+                      <option value="c930e">Logitech C930e · 90° dFOV</option>
+                      <option value="manual">Другая камера · ввести угол вручную</option>
+                    </select>
+                    <ChevronDown size={13} aria-hidden="true" />
+                  </div>
+                </div>
+                <div className="stereo-formula" aria-label="Формула глубины">
+                  <div className="formula-line">Z <span>=</span> f <span>×</span> B <span>/</span> d</div>
+                  <div className="formula-values">
+                    <span>f = <strong>{geometry.focalPx.toFixed(0)} px</strong> {settings.cameraPreset === 'c930e' ? `· ${C930E_CROP_FOV_DEG.toFixed(1).replace('.', ',')}° на кадр 4:3` : ''}</span>
+                    <span>B = <strong>{(settings.baselineCm / 100).toFixed(2).replace('.', ',')} м</strong></span>
+                    <span>d = <strong>{measuredDisparity >= 1 ? `${measuredDisparity} px` : 'ещё не измерена'}</strong></span>
+                    <span>Z = <strong>{measuredDepth != null ? `≈ ${measuredDepth.toFixed(measuredDepth < 1 ? 2 : 1).replace('.', ',')} м` : 'Не измерено'}</strong></span>
+                  </div>
+                  <p>Смещение d — разница положения объекта в кадрах двух камер в пикселях; чем оно больше, тем ближе объект. f известен из угла обзора {settings.cameraPreset === 'c930e' ? `камеры ${C930E.label}` : 'вашей камеры'}.</p>
+                </div>
+                <div className="parameter-grid"><ParamInput label="База B" value={settings.baselineCm} min={1} max={200} suffix="см" description="Расстояние между центрами объективов двух камер — единственное измерение, которое нужно вам сделать. Без него метры недостоверны." onValue={(value) => setSettings((current) => ({ ...current, baselineCm: value }))} />{settings.cameraPreset === 'manual' && <ParamInput label="Угол обзора" value={settings.horizontalFov} min={20} max={150} suffix="°" description="Горизонтальный угол обзора после кадрирования до 4:3" onValue={(value) => setSettings((current) => ({ ...current, horizontalFov: value }))} />}</div>
+                <div className="range-control"><div><label htmlFor="max-depth">Дальность сцены</label><strong>{settings.maxDepthM} м</strong></div><input id="max-depth" type="range" min="1" max="30" step="1" value={settings.maxDepthM} onChange={(event) => setSettings((current) => ({ ...current, maxDepthM: Number(event.target.value) }))} /><div className="range-labels"><span>1 м</span><span>30 м</span></div></div>
+                <div className="geometry-note"><Info size={14} /><span>Измерьте расстояние между центрами объективов (базу B) в сантиметрах — как в схеме сверху из ролика про стереозрение. Глубина считается как Z = f × B / d по подобным треугольникам; без измеренной базы метры недостоверны.</span></div>
+              </section>
               <button className="setup-tip" onClick={() => setGuideOpen(true)}><span className="tip-icon"><Focus size={17} /></span><span><strong>Нужен хороший ракурс</strong><small>Направьте камеры параллельно на одну сцену с заметными деталями.</small><em>Как настроить камеры <ArrowRight size={13} /></em></span></button>
             </aside>
           </div>

@@ -2,7 +2,11 @@
  * A small, deliberately conservative stereo matcher for approximately parallel,
  * unmirrored cameras. It does not replace a calibrated stereo-rectification rig.
  * All coordinates and disparities below refer to the same cropped input image.
+ * Depth follows the classic stereo-vision formula from similar triangles,
+ * Z = f * B / d, with f from the camera field of view (see c930e.ts).
  */
+import { depthFromDisparity, focalPixels as focalFromFov } from './c930e';
+
 export interface Frame {
   width: number;
   height: number;
@@ -43,6 +47,8 @@ export interface PointCloudData {
   rgbColors: Float32Array;
   depthColors: Float32Array;
   depthMap: Uint8ClampedArray;
+  /** Optional rainbow map of raw disparity in pixels (OpenCV-style view). */
+  disparityMap?: Uint8ClampedArray;
   /** Index in the left 4:3 frame for each corresponding position. */
   pixelIndices: Uint32Array;
   width: number;
@@ -373,6 +379,21 @@ export function depthColor(depth: number, maxDepth: number): [number, number, nu
   ) as [number, number, number];
 }
 
+/**
+ * Rainbow colouring of raw disparity in pixels (blue = small shift/far,
+ * red = large shift/near), the way OpenCV disparity previews look in the
+ * stereo-vision walkthrough this pipeline follows.
+ */
+export function disparityColor(disparity: number, maxDisparity: number): [number, number, number] {
+  const t = Math.max(0, Math.min(1, disparity / Math.max(1, maxDisparity)));
+  const hue = (1 - t) * 240; // 240° = blue … 0° = red
+  const c = 1;
+  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
+  const m = 0;
+  const [r, g, b] = hue < 60 ? [c, x, 0] : hue < 120 ? [x, c, 0] : hue < 180 ? [0, c, x] : hue < 240 ? [0, x, c] : [x, 0, c];
+  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
+}
+
 /** Estimate a sparse, colourised 3D point cloud using positive disparity. */
 export function reconstructStereo(leftFrame: Frame, rightFrame: Frame, settings: StereoSettings): PointCloudData {
   if (leftFrame.width !== rightFrame.width || leftFrame.height !== rightFrame.height) {
@@ -390,9 +411,11 @@ export function reconstructStereo(leftFrame: Frame, rightFrame: Frame, settings:
   const left = describe(leftFrame);
   const right = describe(rightFrame);
   const { width: w, height: h } = left;
-  const focalPixels = w / (2 * Math.tan((horizontalFov * Math.PI) / 360));
+  // f — focal in pixels from the camera FOV; Z = f * B / d as in the classic
+  // stereo-vision derivation (similar triangles, top view of the pair).
+  const focal = focalFromFov(w, horizontalFov);
   const baselineM = baselineCm / 100;
-  const maxDisparity = Math.min(Math.floor(w * 0.32), Math.ceil((focalPixels * baselineM) / 0.2));
+  const maxDisparity = Math.min(Math.floor(w * 0.32), Math.ceil((focal * baselineM) / 0.2));
   const step = Math.max(2, Math.floor(settings.sampleStep ?? 3));
   const positions: number[] = [];
   const rgbColors: number[] = [];
@@ -400,11 +423,16 @@ export function reconstructStereo(leftFrame: Frame, rightFrame: Frame, settings:
   const depths: number[] = [];
   const pixelIndices: number[] = [];
   const map = new Uint8ClampedArray(w * h * 4);
+  const disparityMap = new Uint8ClampedArray(w * h * 4);
   for (let i = 0; i < w * h; i++) {
     map[i * 4] = 13;
     map[i * 4 + 1] = 31;
     map[i * 4 + 2] = 36;
     map[i * 4 + 3] = 255;
+    disparityMap[i * 4] = 13;
+    disparityMap[i * 4 + 1] = 31;
+    disparityMap[i * 4 + 2] = 36;
+    disparityMap[i * 4 + 3] = 255;
   }
 
   for (let y = RADIUS + 1; y < h - RADIUS - 1; y += step) {
@@ -415,16 +443,18 @@ export function reconstructStereo(leftFrame: Frame, rightFrame: Frame, settings:
       const reverse = searchLine(right, left, forward.x, forward.y, maxDisparity, 1, -settings.verticalOffset);
       if (!reverse || Math.abs(reverse.x - x) > 1 || Math.abs(reverse.y - y) > 1) continue;
       const disparity = x - forward.x;
-      const z = (focalPixels * baselineM) / disparity;
-      if (z < 0.2 || z > maxDepthM) continue;
-      const pointX = ((x - w / 2) * z) / focalPixels;
-      const pointY = ((h / 2 - y) * z) / focalPixels;
+      // Z = f * B / d — the video's depth formula; null means unmeasurable.
+      const z = depthFromDisparity(focal, baselineM, disparity);
+      if (z == null || z < 0.2 || z > maxDepthM) continue;
+      const pointX = ((x - w / 2) * z) / focal;
+      const pointY = ((h / 2 - y) * z) / focal;
       positions.push(pointX, pointY, -z);
       pixelIndices.push(y * w + x);
       const pixel = (y * w + x) * 4;
       rgbColors.push(leftFrame.data[pixel] / 255, leftFrame.data[pixel + 1] / 255, leftFrame.data[pixel + 2] / 255);
       const color = depthColor(z, maxDepthM);
       depthColors.push(color[0] / 255, color[1] / 255, color[2] / 255);
+      const dColor = disparityColor(disparity, maxDisparity);
       depths.push(z);
       for (let yy = y; yy < Math.min(h, y + step); yy++) {
         for (let xx = x; xx < Math.min(w, x + step); xx++) {
@@ -432,6 +462,9 @@ export function reconstructStereo(leftFrame: Frame, rightFrame: Frame, settings:
           map[p] = color[0];
           map[p + 1] = color[1];
           map[p + 2] = color[2];
+          disparityMap[p] = dColor[0];
+          disparityMap[p + 1] = dColor[1];
+          disparityMap[p + 2] = dColor[2];
         }
       }
     }
@@ -443,6 +476,7 @@ export function reconstructStereo(leftFrame: Frame, rightFrame: Frame, settings:
     rgbColors: new Float32Array(rgbColors),
     depthColors: new Float32Array(depthColors),
     depthMap: map,
+    disparityMap,
     pixelIndices: new Uint32Array(pixelIndices),
     width: w,
     height: h,

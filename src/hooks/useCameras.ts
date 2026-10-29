@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { c930eConstraints, pickStereoDevices, type CameraOption } from '../lib/c930e';
 
-export interface CameraOption {
-  id: string;
-  label: string;
-}
+export type { CameraOption };
 
 export interface CameraSlot extends CameraOption {
   stream: MediaStream;
@@ -35,15 +33,8 @@ function explainError(error: unknown): string {
 }
 
 function constraints(deviceId?: string): MediaStreamConstraints {
-  return {
-    audio: false,
-    video: {
-      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-      width: { ideal: 640 },
-      height: { ideal: 480 },
-      aspectRatio: { ideal: 4 / 3 },
-    },
-  };
+  // Two Logitech C930e over USB: 720p30 16:9 keeps both streams in sync.
+  return c930eConstraints(deviceId);
 }
 
 /** Owns every MediaStream it opens, including partial and cancelled requests. */
@@ -135,7 +126,10 @@ export function useCameras() {
       publish('a', { id: firstId, label: firstLabel, stream: initial });
       // The published stream is now owned by slotsRef, including on errors below.
       initial = undefined;
-      const other = available.find((device) => device.id !== firstId);
+      // Prefer the second Logitech C930e so the stereo geometry defaults fit.
+      const pair = pickStereoDevices(available);
+      const other = (pair?.second && pair.second.id !== firstId ? pair.second : undefined)
+        ?? available.find((device) => device.id !== firstId);
       if (!other) {
         setError('Найдена только одна камера. Подключите вторую, обновите список и выберите её в карточке камеры 02.');
         return;

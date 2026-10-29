@@ -32,6 +32,9 @@ describe('app smoke', () => {
     expect(tabs).toContain('Хомяк');
     // Auto setup button exists (in the setup panel).
     expect(screen.getAllByText('Автонастройка').length).toBeGreaterThan(0);
+    // The classic stereo-depth formula from the reference pipeline is visible.
+    expect(screen.getByText('Z = f × B / d')).toBeTruthy();
+    expect(screen.getAllByText(/Logitech C930e/).length).toBeGreaterThan(0);
     // Without cameras the app asks for cameras and never claims a ready merge.
     expect(screen.getAllByText('Подключите две камеры').length).toBeGreaterThan(0);
     expect(screen.queryByText('Общий вид готов')).toBeNull();

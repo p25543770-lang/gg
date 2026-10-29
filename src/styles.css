@@ -426,3 +426,22 @@ h1 { font-size: clamp(26px, 2.1vw, 32px); line-height: 1.2; letter-spacing: -.06
 @media (max-width: 1180px) {
   .merge-status { bottom: 16px; max-width: calc(100% - 32px); }
 }
+
+/* ---- Logitech C930e / stereo formula additions ---- */
+.camera-models { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.model-chip { font: 500 8px var(--mono); letter-spacing: .05em; color: #8b9a91; background: #f4f6f3; border: 1px solid #e7ece6; border-radius: 5px; padding: 5px 8px; }
+.model-chip.ok { color: #4d7455; background: #edf6e9; border-color: #d5e6cf; }
+.camera-preset { margin-bottom: 13px; }
+.camera-preset > label { display: block; color: #637a69; font-size: 10px; font-weight: 700; margin-bottom: 6px; }
+.camera-preset .select-wrap { position: relative; }
+.camera-preset select { width: 100%; }
+.stereo-formula { background: #172a29; border-radius: 8px; padding: 13px 14px; margin-bottom: 13px; }
+.formula-line { color: #d9f2c6; font: 500 17px var(--mono); letter-spacing: .02em; }
+.formula-line span { color: #7fa08c; padding: 0 3px; }
+.formula-values { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 12px; margin-top: 10px; }
+.formula-values span { color: #93aca0; font: 400 9px var(--mono); }
+.formula-values strong { color: #e4f7d6; font-weight: 500; }
+.stereo-formula p { margin: 10px 0 0; color: #86a094; font-size: 9px; line-height: 1.65; }
+@media (max-width: 1180px) {
+  .formula-values { grid-template-columns: 1fr; }
+}
