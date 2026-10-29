@@ -1,0 +1,28 @@
+name: Windows portable app
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, arena/ab011e60-gg]
+  pull_request:
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:desktop
+      - run: npm run build:win
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Stereo-Space-Windows-x64
+          path: release/*.exe
+          if-no-files-found: error
