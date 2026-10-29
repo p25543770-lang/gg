@@ -1,0 +1,23 @@
+name: Publish Windows download
+on:
+  workflow_dispatch:
+jobs:
+  publish:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download verified Windows build
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 40895718426 --name Stereo-Space-Windows-x64 --dir release
+      - name: Publish executable
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $exe = (Get-ChildItem release/*.exe).FullName
+          gh release create v1.0.0-windows $exe --target 2f4f41c295cedbe9c5cb5ff40f899f5760ac1615 --title "Stereo Space 1.0.0 — Windows x64" --notes "Portable Windows x64 executable. Built and tested on Windows by GitHub Actions run 40895718426. No Node.js or manual server required; ONNX model and WASM are bundled for offline processing. Unsigned build: SmartScreen may warn. GUI launch, physical cameras and real hamster detection have not been validated."
