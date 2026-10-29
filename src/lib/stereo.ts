@@ -18,6 +18,15 @@ export interface OrientationResult {
   /** Median y(A) - y(B), in pixels of the processed frame. */
   verticalOffset: number;
   medianDisparity: number;
+  /** Fraction of vertical strips of frame A covered by inlier matches, 0..1. */
+  overlapRatio: number;
+  /** Interquartile spread of inlier disparities, pixels. */
+  disparitySpread: number;
+  /** Mean local texture energy of each frame (higher = more detail). */
+  sharpnessA: number;
+  sharpnessB: number;
+  /** meanLuminance(A) / meanLuminance(B); 1 = equal exposure. */
+  brightnessRatio: number;
 }
 
 export interface StereoSettings {
@@ -43,7 +52,7 @@ export interface PointCloudData {
   far: number | null;
 }
 
-interface Descriptors {
+export interface Descriptors {
   width: number;
   height: number;
   gray: Uint8Array;
@@ -51,7 +60,7 @@ interface Descriptors {
   high: Uint32Array;
 }
 
-interface Match {
+export interface Match {
   x: number;
   y: number;
   cost: number;
@@ -73,7 +82,7 @@ function validateFrame(frame: Frame) {
   }
 }
 
-function describe(frame: Frame): Descriptors {
+export function describe(frame: Frame): Descriptors {
   validateFrame(frame);
   const { width, height, data } = frame;
   const gray = new Uint8Array(width * height);
@@ -120,7 +129,7 @@ function distance(a: Descriptors, ai: number, b: Descriptors, bi: number): numbe
   return popcount(a.low[ai] ^ b.low[bi]) + popcount(a.high[ai] ^ b.high[bi]);
 }
 
-function texture(image: Descriptors, x: number, y: number): number {
+export function texture(image: Descriptors, x: number, y: number): number {
   const { gray, width: w } = image;
   const i = y * w + x;
   const gx =
@@ -134,7 +143,7 @@ function texture(image: Descriptors, x: number, y: number): number {
   return Math.min(gx, gy);
 }
 
-function median(values: number[]): number {
+export function median(values: number[]): number {
   if (!values.length) return 0;
   const sorted = [...values].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
@@ -216,6 +225,8 @@ function searchArea(
  * Infer camera order from the sign of mutually checked horizontal disparities.
  * A positive x(A)-x(B) means A is left for parallel cameras. No guess is
  * returned if the sign is ambiguous or there aren't enough shared features.
+ * The same pass reports real pair metrics (overlap, spread, sharpness, exposure)
+ * used by auto setup — every number is measured, never invented.
  */
 export function inferCameraOrder(frameA: Frame, frameB: Frame): OrientationResult {
   if (frameA.width !== frameB.width || frameA.height !== frameB.height) {
@@ -225,14 +236,19 @@ export function inferCameraOrder(frameA: Frame, frameB: Frame): OrientationResul
   const b = describe(frameB);
   const maxDx = Math.max(4, Math.floor(a.width * 0.32));
   const maxDy = Math.max(3, Math.floor(a.height * 0.055));
-  const matches: Array<{ dx: number; dy: number }> = [];
+  const matches: Array<{ x: number; dx: number; dy: number; bx: number }> = [];
+  const featureList = featurePoints(a);
+  let sharpA = 0;
+  let sharpB = 0;
 
-  for (const point of featurePoints(a)) {
+  for (const point of featureList) {
+    sharpA += texture(a, point.x, point.y);
     const forward = searchArea(a, b, point.x, point.y, maxDx, maxDy);
     if (!forward || Math.abs(point.x - forward.x) < 2) continue;
+    sharpB += texture(b, forward.x, forward.y);
     const reverse = searchArea(b, a, forward.x, forward.y, maxDx, maxDy);
     if (!reverse || Math.abs(reverse.x - point.x) > 1 || Math.abs(reverse.y - point.y) > 1) continue;
-    matches.push({ dx: point.x - forward.x, dy: point.y - forward.y });
+    matches.push({ x: point.x, dx: point.x - forward.x, dy: point.y - forward.y, bx: forward.x });
   }
 
   const dy = median(matches.map((match) => match.dy));
@@ -250,17 +266,42 @@ export function inferCameraOrder(frameA: Frame, frameB: Frame): OrientationResul
         : 'b-left'
       : null;
 
+  // Overlap: how much of the left width actually found something in the right.
+  const strips = 16;
+  const covered = new Array<boolean>(strips).fill(false);
+  for (const match of inliers) covered[Math.min(strips - 1, Math.floor((match.x / a.width) * strips))] = true;
+  const overlapRatio = covered.filter(Boolean).length / strips;
+  const sortedDx = inliers.map((match) => match.dx).sort((x, y) => x - y);
+  const disparitySpread = sortedDx.length >= 4
+    ? sortedDx[Math.floor((sortedDx.length - 1) * 0.75)] - sortedDx[Math.floor((sortedDx.length - 1) * 0.25)]
+    : 0;
+
+  let sumA = 0;
+  let sumB = 0;
+  let countA = 0;
+  for (let i = 0; i < a.gray.length; i += 7) {
+    sumA += a.gray[i];
+    sumB += b.gray[i];
+    countA++;
+  }
+  const brightnessRatio = countA && sumB > 0 ? sumA / sumB : 1;
+
   return {
     order,
     matches: inliers.length,
     agreement,
     verticalOffset: Math.round(dy),
     medianDisparity: signedMedian,
+    overlapRatio,
+    disparitySpread,
+    sharpnessA: featureList.length ? sharpA / featureList.length : 0,
+    sharpnessB: featureList.length && matches.length ? sharpB / matches.length : 0,
+    brightnessRatio,
   };
 }
 
 /** Search an approximately rectified epipolar line in the specified direction. */
-function searchLine(
+export function searchLine(
   source: Descriptors,
   target: Descriptors,
   x: number,

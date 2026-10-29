@@ -3,6 +3,35 @@ import * as ort from 'onnxruntime-web/wasm';
 import wasmUrl from 'onnxruntime-web/ort-wasm-simd-threaded.wasm?url';
 import { estimateHamsterDepth, extractRegion, hamsterSearchRegions, mapRegionBox, prepareHamsterInput, selectHamster, type HamsterBox, type HamsterObservation } from './hamster';
 import { inferCameraOrder, reconstructStereo, type CameraOrder, type Frame, type StereoSettings } from './stereo';
+import {
+  buildDisparityField,
+  combineFrames,
+  combinePlanar,
+  estimateHomography,
+  photometricCompensation,
+  transferBoxToCombined,
+  type CombinedFrame,
+  type MappedQuad,
+} from './stitch';
+
+export type CombineStatus =
+  | 'ready'
+  | 'planar'
+  | 'unreliable-depth'
+  | 'low-overlap'
+  | 'insufficient'
+  | 'error';
+
+/** Serializable subset of CombinedFrame (typed-array buffers are transferred). */
+export interface CombinedPayload {
+  width: number;
+  height: number;
+  data: ArrayBuffer;
+  coverage: ArrayBuffer;
+  mode: 'depth' | 'planar';
+  fillRatio: number;
+  parallaxRatio: number;
+}
 
 export type WorkerRequest =
   | { kind: 'init-hamster'; modelUrl: string }
@@ -20,6 +49,20 @@ export type WorkerRequest =
     settings?: StereoSettings;
   };
 
+export type WorkerResponse =
+  | { kind: 'detect'; result: ReturnType<typeof inferCameraOrder> }
+  | {
+    kind: 'reconstruct';
+    result: ReturnType<typeof reconstructStereo>;
+    frameId: number;
+    observation: HamsterObservation | null;
+    combined: CombinedPayload | null;
+    boxOnCombined: MappedQuad | null;
+    combineStatus: CombineStatus;
+  }
+  | { kind: 'hamster-status'; status: 'ready' | 'error'; message?: string }
+  | { kind: 'error'; message: string };
+
 let model: ort.InferenceSession | null = null;
 let modelStarted = false;
 let searchCursor = 0;
@@ -32,9 +75,9 @@ async function initHamster(modelUrl: string) {
     ort.env.wasm.numThreads = 1;
     ort.env.wasm.wasmPaths = { wasm: wasmUrl };
     model = await ort.InferenceSession.create(modelUrl, { executionProviders: ['wasm'] });
-    self.postMessage({ kind: 'hamster-status', status: 'ready' });
+    self.postMessage({ kind: 'hamster-status', status: 'ready' } satisfies WorkerResponse);
   } catch (error) {
-    self.postMessage({ kind: 'hamster-status', status: 'error', message: error instanceof Error ? error.message : 'Detector initialization failed' });
+    self.postMessage({ kind: 'hamster-status', status: 'error', message: error instanceof Error ? error.message : 'Detector initialization failed' } satisfies WorkerResponse);
   }
 }
 
@@ -88,9 +131,75 @@ async function analyseHamster(left: Frame, result: ReturnType<typeof reconstruct
     const failed = model;
     model = null;
     void failed?.release();
-    self.postMessage({ kind: 'hamster-status', status: 'error', message: error instanceof Error ? error.message : 'Detector inference failed' });
+    self.postMessage({ kind: 'hamster-status', status: 'error', message: error instanceof Error ? error.message : 'Detector inference failed' } satisfies WorkerResponse);
     return null;
   }
+}
+
+interface CombineOutcome {
+  combined: CombinedPayload | null;
+  boxOnCombined: MappedQuad | null;
+  combineStatus: CombineStatus;
+  transfer: Transferable[];
+}
+
+function toPayload(frame: CombinedFrame, transfer: Transferable[]): CombinedPayload {
+  const data = frame.data.buffer as ArrayBuffer;
+  const coverage = frame.coverage.buffer as ArrayBuffer;
+  transfer.push(data, coverage);
+  return {
+    width: frame.width,
+    height: frame.height,
+    data,
+    coverage,
+    mode: frame.mode,
+    fillRatio: frame.fillRatio,
+    parallaxRatio: frame.parallaxRatio,
+  };
+}
+
+/**
+ * Merge the rectified-ish pair into one combined frame. Depth-aware mid-view
+ * reprojection when disparity is trustworthy; a labelled planar homography for
+ * mostly planar scenes; refusal (raw streams upstream) when nothing is reliable.
+ */
+function combinePair(
+  left: Frame,
+  right: Frame,
+  settings: StereoSettings,
+  box: HamsterBox | null,
+): CombineOutcome {
+  const transfer: Transferable[] = [];
+  const field = buildDisparityField(left, right, settings.verticalOffset, Math.floor(left.width * 0.3));
+  const photometric = photometricCompensation(left, right, field.inlierMatches);
+
+  if (field.matchCount < 12) {
+    return { combined: null, boxOnCombined: null, combineStatus: 'insufficient', transfer };
+  }
+
+  let frame: CombinedFrame;
+  let status: CombineStatus;
+  if (field.confidentRatio >= 0.12) {
+    frame = combineFrames(left, right, field, {
+      maxDisparity: Math.floor(left.width * 0.3),
+      verticalOffset: settings.verticalOffset,
+    });
+    status = field.confidentRatio >= 0.35 ? 'ready' : 'unreliable-depth';
+  } else {
+    const points = field.inlierMatches.map((m) => ({ from: { x: m.xr, y: m.yr }, to: { x: m.x, y: m.y } }));
+    const fit = estimateHomography(points);
+    if (!fit) {
+      return { combined: null, boxOnCombined: null, combineStatus: 'insufficient', transfer };
+    }
+    frame = combinePlanar(left, right, fit.h, photometric);
+    status = 'planar';
+  }
+  return {
+    combined: toPayload(frame, transfer),
+    boxOnCombined: box ? transferBoxToCombined(box, frame.mapping) : null,
+    combineStatus: status,
+    transfer,
+  };
 }
 
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
@@ -103,7 +212,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
     const frameA: Frame = { width: request.width, height: request.height, data: new Uint8ClampedArray(request.a) };
     const frameB: Frame = { width: request.width, height: request.height, data: new Uint8ClampedArray(request.b) };
     if (request.kind === 'detect') {
-      self.postMessage({ kind: 'detect', result: inferCameraOrder(frameA, frameB) });
+      self.postMessage({ kind: 'detect', result: inferCameraOrder(frameA, frameB) } satisfies WorkerResponse);
     } else {
       if (!request.order || !request.settings) throw new Error('Missing stereo settings');
       const left = request.order === 'a-left' ? frameA : frameB;
@@ -115,11 +224,27 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         ? { width: request.detail.width, height: request.detail.height, data: new Uint8ClampedArray(request.detail.data) }
         : left;
       const observation = await analyseHamster(detectorFrame, result, request);
-      const transfer: Transferable[] = [result.positions.buffer, result.rgbColors.buffer, result.depthColors.buffer, result.depthMap.buffer, result.pixelIndices.buffer];
+      const combined = combinePair(left, right, request.settings, observation?.box ?? null);
+      const transfer: Transferable[] = [
+        result.positions.buffer,
+        result.rgbColors.buffer,
+        result.depthColors.buffer,
+        result.depthMap.buffer,
+        result.pixelIndices.buffer,
+        ...combined.transfer,
+      ];
       if (observation) transfer.push(observation.pixels.buffer as ArrayBuffer);
-      self.postMessage({ kind: 'reconstruct', result, frameId: request.frameId, observation }, { transfer });
+      self.postMessage({
+        kind: 'reconstruct',
+        result,
+        frameId: request.frameId,
+        observation,
+        combined: combined.combined,
+        boxOnCombined: combined.boxOnCombined,
+        combineStatus: combined.combineStatus,
+      } satisfies WorkerResponse, { transfer });
     }
   } catch (error) {
-    self.postMessage({ kind: 'error', message: error instanceof Error ? error.message : 'Stereo processing failed' });
+    self.postMessage({ kind: 'error', message: error instanceof Error ? error.message : 'Stereo processing failed' } satisfies WorkerResponse);
   }
 };

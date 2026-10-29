@@ -383,3 +383,46 @@ h1 { font-size: clamp(26px, 2.1vw, 32px); line-height: 1.2; letter-spacing: -.06
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* ---- Combined view & setup additions ---- */
+.raw-pair { position: absolute; inset: 0; display: flex; gap: 2px; background: #0d1b20; }
+.raw-cell { position: relative; flex: 1; min-width: 0; overflow: hidden; background: #12262c; display: flex; align-items: center; justify-content: center; }
+.raw-cell video { width: 100%; height: 100%; object-fit: contain; display: none; }
+.raw-cell video.visible { display: block; }
+.raw-label { position: absolute; top: 12px; left: 12px; background: #16303aee; color: #bfe8d2; font: 500 9px var(--mono); letter-spacing: .08em; padding: 5px 9px; border-radius: 5px; z-index: 2; }
+.raw-skew { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); background: #2c2410e0; color: #ffe0a0; font-size: 10px; padding: 6px 12px; border-radius: 6px; white-space: nowrap; z-index: 3; }
+.combined-canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
+.merge-status { position: absolute; left: 16px; bottom: 52px; max-width: min(420px, 70%); background: #14282be0; border: 1px solid #2c4744; border-radius: 8px; padding: 11px 13px; z-index: 4; }
+.merge-status-head { display: flex; align-items: center; gap: 8px; color: #d8ece0; font-size: 11px; }
+.merge-status p { margin: 6px 0 0; color: #9db4ab; font-size: 10px; line-height: 1.6; }
+.merge-status.busy .merge-status-head { color: #cfe6d6; }
+.merge-status.ready { border-color: #3c6b4c; }
+.merge-status.ready .merge-status-head { color: #c9f2b2; }
+.merge-status.warn { border-color: #7a5c22; }
+.merge-status.warn .merge-status-head { color: #ffdc9b; }
+.merge-status.warn p { color: #d7c096; }
+.merge-status.demo .merge-status-head { color: #b9c6c2; }
+.merge-mode-chip { font: 500 8px var(--mono); letter-spacing: .08em; border: 1px solid #46625a; border-radius: 4px; padding: 3px 7px; color: #9fc4b4; }
+.merge-advice { margin-top: 8px; padding-top: 8px; border-top: 1px solid #2c4744; color: #b7cbc0; font-size: 10px; line-height: 1.6; }
+.merge-advice strong { color: #d9efdd; }
+.merge-metrics { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 2px 0; }
+.merge-metrics span { background: #eef3ee; border: 1px solid #e0e8df; color: #5c7266; font: 500 9px var(--mono); letter-spacing: .02em; padding: 5px 9px; border-radius: 5px; }
+.setup-checklist { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.setup-check { display: flex; align-items: center; gap: 8px; font-size: 10px; color: #8a9b90; background: #f6f8f5; border: 1px solid #ebefea; border-radius: 6px; padding: 7px 9px; }
+.setup-check span { display: grid; place-items: center; width: 17px; height: 17px; border-radius: 50%; background: #e7ece6; color: #93a29a; font: 500 8px var(--mono); flex: none; }
+.setup-check.done { color: #46694f; border-color: #d7e6d3; background: #f0f7ed; }
+.setup-check.done svg { color: #6fae72; flex: none; }
+.setup-check.active { color: #46694f; border-color: #cfe2ca; }
+.setup-check.warn { color: #8a6a25; border-color: #ead9ae; background: #faf5e8; }
+.setup-check.warn svg { color: #c19a3f; }
+.profile-note { margin-bottom: 11px; padding: 8px 10px; border-radius: 6px; font-size: 9px; line-height: 1.6; }
+.profile-note.ok { background: #eef6eb; border: 1px solid #dcebd8; color: #5c7d61; }
+.profile-note.warn { background: #faf3e2; border: 1px solid #ecdcae; color: #8c6c2c; }
+.depth-sub-switch { position: absolute; top: 14px; right: 14px; display: flex; gap: 3px; background: #14282bd9; border: 1px solid #2c4744; border-radius: 6px; padding: 3px; z-index: 4; }
+.depth-sub-switch button { border: 0; background: transparent; color: #8fa8a0; font-size: 10px; padding: 5px 11px; border-radius: 4px; }
+.depth-sub-switch button.selected { background: #2b4740; color: #d7efdc; }
+.source-pill.raw-pill { background: #2b3a42; color: #c3d2dc; }
+.auto-setup-intro { gap: 7px; }
+@media (max-width: 1180px) {
+  .merge-status { bottom: 16px; max-width: calc(100% - 32px); }
+}
