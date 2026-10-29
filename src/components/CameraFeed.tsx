@@ -2,6 +2,8 @@ import { useEffect, type RefObject } from 'react';
 import { Camera, ChevronDown } from 'lucide-react';
 import type { CameraSlot, CameraOption } from '../hooks/useCameras';
 import type { HamsterObservation } from '../lib/hamster';
+import type { Corner } from '../lib/corners';
+import CornerOverlay from './CornerOverlay';
 import HamsterFrame from './HamsterFrame';
 
 interface Props {
@@ -13,10 +15,12 @@ interface Props {
   position: string;
   busy: boolean;
   observation: HamsterObservation | null;
+  corners: Corner[];
+  cornersOn: boolean;
   onChange: (slot: 'a' | 'b', id: string) => void;
 }
 
-export default function CameraFeed({ slot, camera, otherId, devices, videoRef, position, busy, observation, onChange }: Props) {
+export default function CameraFeed({ slot, camera, otherId, devices, videoRef, position, busy, observation, corners, cornersOn, onChange }: Props) {
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -30,6 +34,7 @@ export default function CameraFeed({ slot, camera, otherId, devices, videoRef, p
     <div className="camera-card">
       <div className="camera-preview">
         <video ref={videoRef} autoPlay muted playsInline className={camera ? 'visible' : ''} />
+        {camera && cornersOn && !observation?.box && <CornerOverlay corners={corners} videoRef={videoRef} fit="cover" />}
         {camera && observation?.box && <HamsterFrame observation={observation} className="camera-analysis-frame" />}
         {!camera && (
           <div className="camera-empty">

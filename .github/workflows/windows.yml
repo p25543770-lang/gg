@@ -2,7 +2,7 @@ name: Windows portable app
 on:
   workflow_dispatch:
   push:
-    branches: [main, arena/ab011e60-gg]
+    branches: [main, arena/086343bf-gg]
   pull_request:
 jobs:
   windows:
@@ -48,8 +48,8 @@ jobs:
             echo "Expected exactly one Windows executable." >&2
             exit 1
           fi
-          gh release create v1.0.0-windows "${files[0]}" \
+          gh release create v1.1.0-windows "${files[0]}" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Stereo Space 1.0.0 — Windows x64" \
-            --notes "Portable Windows x64 executable built and tested by GitHub Actions run $GITHUB_RUN_ID from commit $GITHUB_SHA. No Node.js or manual server required; the ONNX model and WASM are bundled for offline processing. Unsigned build: SmartScreen may warn. GUI launch, physical cameras and real hamster detection have not been validated. The updated PROMPT.md describes planned improvements to automatic calibration and the unified 3D map; those new requirements are not implemented in this executable."
+            --title "Stereo Space 1.1.0 — Windows x64" \
+            --notes "Portable Windows x64 executable built and tested by GitHub Actions run $GITHUB_RUN_ID from commit $GITHUB_SHA. This build includes the combined live view ('Общий вид'): the two camera streams are geometrically merged into one frame with depth-aware parallax compensation, exposure matching and a smooth overlap seam; raw two-camera and depth/3D modes remain available. No Node.js or manual server required; the ONNX model and WASM are bundled for offline processing. Unsigned build: SmartScreen may warn. The automated test suite (geometry, coordinate transfer, hamster box transfer, overlap/depth failure handling, camera order, frame timing, disconnects, resource cleanup) runs in this workflow; a real merge on two physical cameras has not been validated in CI — verify it with your own hardware."

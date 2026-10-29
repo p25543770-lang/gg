@@ -9,11 +9,15 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v4
-      - name: Download verified Windows build
+      - name: Download the latest verified Windows build
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download 40896408102 --name Stereo-Space-Windows-x64 --dir release
+        run: |
+          $runId = gh run list --workflow "Windows portable app" --status success --limit 1 --json databaseId --jq '.[0].databaseId'
+          if (-not $runId) { throw "No successful Windows build run found." }
+          Write-Host "Downloading artifacts from run $runId"
+          gh run download $runId --name Stereo-Space-Windows-x64 --dir release
       - name: Publish executable
         shell: pwsh
         env:
@@ -21,4 +25,4 @@ jobs:
         run: |
           $exe = (Get-ChildItem release/*.exe).FullName
           $target = $env:GITHUB_SHA
-          gh release create v1.0.0-windows $exe --target $target --title "Stereo Space 1.0.0 — Windows x64" --notes "Portable Windows x64 executable. Application code is unchanged from commit 54f991fa70e7e1fed46721f85b419b92afef6936; built and tested on Windows by GitHub Actions run 40896408102. This release also includes the updated PROMPT.md. The new automatic-calibration and unified-3D-map requirements in that prompt are not implemented by this release. No Node.js or manual server required; ONNX model and WASM are bundled for offline processing. Unsigned build: SmartScreen may warn. GUI launch, physical cameras and real hamster detection have not been validated."
+          gh release create v1.1.0-windows $exe --target $target --title "Stereo Space 1.1.0 — Windows x64" --notes "Portable Windows x64 executable with the combined live view (Общий вид): geometric merging of two camera streams into one frame with depth-aware parallax compensation and exposure matching. Built and tested on Windows by GitHub Actions (latest successful 'Windows portable app' run). No Node.js or manual server required; ONNX model and WASM are bundled for offline processing. Unsigned build: SmartScreen may warn. The automated test suite covers geometry, coordinate transfer and failure paths; a real merge on two physical cameras has not been validated in CI — verify it with your own hardware."
