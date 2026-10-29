@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import CameraFeed from './components/CameraFeed';
 import CombinedView from './components/CombinedView';
+import CornerOverlay from './components/CornerOverlay';
 import DepthMap from './components/DepthMap';
 import Guide from './components/Guide';
 import HamsterFrame from './components/HamsterFrame';
@@ -19,6 +20,7 @@ import { downloadPly } from './lib/export';
 import { describeHamsterPosition } from './lib/hamster';
 import { C930E, C930E_CROP_FOV_DEG, describeGeometry, depthFromDisparity, isC930e } from './lib/c930e';
 import { describeSetupReason } from './lib/stitch';
+import type { Corner } from './lib/corners';
 import type { CameraOrder } from './lib/stereo';
 
 type SourceMode = 'demo' | 'live';
@@ -67,7 +69,15 @@ function ParamInput({ label, value, min, max, suffix, onValue, description }: { 
 }
 
 /** Big raw streams for connection / overlap checks — never a fake merged view. */
-function RawPair({ streamA, streamB, order, skewMs }: { streamA: MediaStream | null; streamB: MediaStream | null; order: CameraOrder | null; skewMs: number }) {
+function RawPair({ streamA, streamB, order, skewMs, cornersA, cornersB, cornersOn }: {
+  streamA: MediaStream | null;
+  streamB: MediaStream | null;
+  order: CameraOrder | null;
+  skewMs: number;
+  cornersA: Corner[];
+  cornersB: Corner[];
+  cornersOn: boolean;
+}) {
   const refA = useRef<HTMLVideoElement>(null);
   const refB = useRef<HTMLVideoElement>(null);
   useEffect(() => {
@@ -89,11 +99,13 @@ function RawPair({ streamA, streamB, order, skewMs }: { streamA: MediaStream | n
     <div className="raw-pair">
       <div className="raw-cell">
         <video ref={refA} autoPlay muted playsInline className={streamA ? 'visible' : ''} />
+        {cornersOn && streamA && <CornerOverlay corners={cornersA} videoRef={refA} fit="contain" />}
         <span className="raw-label">{label('a')}</span>
         {!streamA && <div className="camera-empty"><Camera size={19} strokeWidth={1.4} /><span>Нет сигнала</span></div>}
       </div>
       <div className="raw-cell">
         <video ref={refB} autoPlay muted playsInline className={streamB ? 'visible' : ''} />
+        {cornersOn && streamB && <CornerOverlay corners={cornersB} videoRef={refB} fit="contain" />}
         <span className="raw-label">{label('b')}</span>
         {!streamB && <div className="camera-empty"><Camera size={19} strokeWidth={1.4} /><span>Нет сигнала</span></div>}
       </div>
@@ -116,6 +128,8 @@ function App() {
   const [gridVisible, setGridVisible] = useState(true);
   const [guideOpen, setGuideOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
+  // Purple corner marks (Shi-Tomasi corners found on both cameras) — on by default.
+  const [cornersOn, setCornersOn] = useState(true);
   // The video pipeline: f comes from the camera FOV (C930e by default),
   // B is the one measured baseline, Z = f * B / d.
   const effectiveFov = settings.cameraPreset === 'c930e' ? C930E_CROP_FOV_DEG : settings.horizontalFov;
@@ -211,6 +225,7 @@ function App() {
   if (source === 'live' && stereo.perf.latencyMs != null) metricParts.push(`задержка ${stereo.perf.latencyMs} мс`);
   if (source === 'live' && stereo.perf.fps > 0.5) metricParts.push(`${stereo.perf.fps.toFixed(1).replace('.', ',')} кадр/с`);
   if (source === 'live' && stereo.perf.skewMs > 1) metricParts.push(`рассинхронность ${Math.round(stereo.perf.skewMs)} мс`);
+  if (source === 'live' && (stereo.corners.a.length || stereo.corners.b.length)) metricParts.push(`углы: ${stereo.corners.a.length} + ${stereo.corners.b.length}`);
   const qualityNote = stereo.perf.workWidth < 256 ? `Обработка снижена до ${stereo.perf.workWidth}×${stereo.perf.workHeight}` : null;
 
   return (
@@ -268,17 +283,17 @@ function App() {
                 </div>
                 <div className={`visualization ${view === 'depth3d' && depthSub !== 'cloud' ? 'show-depth' : ''}`}>
                   {view === 'combined' && source === 'live' && stereo.combined && (stereo.combineStatus === 'ready' || stereo.combineStatus === 'planar' || stereo.combineStatus === 'unreliable-depth') ? (
-                    <CombinedView combined={stereo.combined} box={stereo.boxOnCombined} showBox={!!hamster} />
+                    <CombinedView combined={stereo.combined} box={stereo.boxOnCombined} showBox={!!hamster} corners={stereo.corners.combined} showCorners={cornersOn} />
                   ) : view === 'combined' && source === 'live' ? (
-                    <RawPair streamA={cameras.slots.a?.stream ?? null} streamB={cameras.slots.b?.stream ?? null} order={stereo.order} skewMs={stereo.perf.skewMs} />
+                    <RawPair streamA={cameras.slots.a?.stream ?? null} streamB={cameras.slots.b?.stream ?? null} order={stereo.order} skewMs={stereo.perf.skewMs} cornersA={stereo.corners.a} cornersB={stereo.corners.b} cornersOn={cornersOn} />
                   ) : view === 'dual' && source === 'live' ? (
-                    <RawPair streamA={cameras.slots.a?.stream ?? null} streamB={cameras.slots.b?.stream ?? null} order={stereo.order} skewMs={stereo.perf.skewMs} />
+                    <RawPair streamA={cameras.slots.a?.stream ?? null} streamB={cameras.slots.b?.stream ?? null} order={stereo.order} skewMs={stereo.perf.skewMs} cornersA={stereo.corners.a} cornersB={stereo.corners.b} cornersOn={cornersOn} />
                   ) : view === 'depth3d' ? (
                     depthSub === 'cloud' ? <PointCloud ref={pointCloudRef} cloud={cloud} colorMode={colorMode} sceneKey={source === 'demo' ? 'demo' : `${cameras.slots.a?.id ?? ''}|${cameras.slots.b?.id ?? ''}`} /> : <DepthMap cloud={cloud} mode={depthSub === 'disparity' ? 'disparity' : 'depth'} />
                   ) : view === 'hamster' && observation ? (
                     <HamsterFrame observation={observation} className="hamster-main-frame" />
                   ) : view === 'hamster' ? null : (
-                    <RawPair streamA={cameras.slots.a?.stream ?? null} streamB={cameras.slots.b?.stream ?? null} order={stereo.order} skewMs={stereo.perf.skewMs} />
+                    <RawPair streamA={cameras.slots.a?.stream ?? null} streamB={cameras.slots.b?.stream ?? null} order={stereo.order} skewMs={stereo.perf.skewMs} cornersA={stereo.corners.a} cornersB={stereo.corners.b} cornersOn={cornersOn} />
                   )}
 
                   {view !== 'hamster' && view !== 'combined' && view !== 'dual' && <div className="viewport-vignette" />}
@@ -311,6 +326,7 @@ function App() {
                 <div className="viewer-footer">
                   <div className="viewer-hint"><MousePointer2 size={15} /><span>{view === 'combined' ? (stereo.combined?.mode === 'planar' ? 'Плоский режим — для плоских сцен' : 'Параллакс компенсируется по глубине') : view === 'dual' ? 'Исходные кадры без обработки' : view === 'depth3d' && depthSub === 'cloud' ? 'Перетащите, чтобы повернуть' : view === 'depth3d' && depthSub === 'disparity' ? 'd — смещение в пикселях: больше d — ближе объект' : view === 'depth3d' ? 'Цвет показывает глубину Z = f × B / d' : 'Рамка относится к показанному кадру'}</span><span className="hint-dot">·</span><span className="hint-secondary">{view === 'combined' ? 'Нет данных — не заполняются' : view === 'dual' ? 'Для проверки подключения и перекрытия' : view === 'depth3d' && depthSub === 'cloud' ? 'Колесо — масштаб' : view === 'depth3d' ? 'Тёмные области — нет данных' : 'Анализ локально'}</span></div>
                   {view === 'depth3d' && <div className="color-switch"><span>ЦВЕТ</span><button className={colorMode === 'depth' ? 'selected' : ''} onClick={() => setColorMode('depth')}>Глубина</button><button className={colorMode === 'rgb' ? 'selected' : ''} onClick={() => setColorMode('rgb')}>RGB</button></div>}
+                  <div className="corner-switch"><span>УГЛЫ</span><button className={cornersOn ? 'selected' : ''} onClick={() => setCornersOn(!cornersOn)} title={cornersOn ? 'Скрыть фиолетовые метки углов' : 'Показать фиолетовые метки углов'}><i /> {cornersOn ? 'Фиолетовые метки вкл' : 'Метки выкл'}</button></div>
                 </div>
               </div>
 
@@ -338,7 +354,7 @@ function App() {
               <section className="control-panel sources-panel" id="sources" aria-labelledby="sources-title"><div className="panel-heading"><div className="panel-title-group"><span className="panel-icon"><Video size={17} /></span><div><div className="panel-kicker">ИСТОЧНИКИ</div><h2 id="sources-title">Камеры</h2></div></div><span className={`count-badge ${pairReady ? 'complete' : ''}`}>{cameraCount} <span>/</span> 2</span></div><p className="panel-description">Две Logitech C930e — одна сцена</p>
                 <div className="camera-models"><span className={`model-chip ${isC930e(cameras.slots.a?.label) ? 'ok' : ''}`}>CAM 01 · {isC930e(cameras.slots.a?.label) ? 'Logitech C930e' : cameras.slots.a ? 'другая камера' : 'нет сигнала'}</span><span className={`model-chip ${isC930e(cameras.slots.b?.label) ? 'ok' : ''}`}>CAM 02 · {isC930e(cameras.slots.b?.label) ? 'Logitech C930e' : cameras.slots.b ? 'другая камера' : 'нет сигнала'}</span></div>
                 {pairReady && !pairIsC930e && <div className="profile-note warn">Геометрия по умолчанию рассчитана под Logitech C930e (90° dFOV, 82,1° по горизонтали). Для других камер включите ручной угол обзора в «Стерео-геометрии».</div>}
-                <div className="cameras-grid"><CameraFeed slot="a" camera={cameras.slots.a} otherId={cameras.slots.b?.id} devices={cameras.devices} videoRef={videoA} position={position('a')} busy={cameras.busy} observation={observation?.leftSlot === 'a' ? observation : null} onChange={cameras.changeCamera} /><CameraFeed slot="b" camera={cameras.slots.b} otherId={cameras.slots.a?.id} devices={cameras.devices} videoRef={videoB} position={position('b')} busy={cameras.busy} observation={observation?.leftSlot === 'b' ? observation : null} onChange={cameras.changeCamera} /></div>
+                <div className="cameras-grid"><CameraFeed slot="a" camera={cameras.slots.a} otherId={cameras.slots.b?.id} devices={cameras.devices} videoRef={videoA} position={position('a')} busy={cameras.busy} observation={observation?.leftSlot === 'a' ? observation : null} corners={stereo.corners.a} cornersOn={cornersOn} onChange={cameras.changeCamera} /><CameraFeed slot="b" camera={cameras.slots.b} otherId={cameras.slots.a?.id} devices={cameras.devices} videoRef={videoB} position={position('b')} busy={cameras.busy} observation={observation?.leftSlot === 'b' ? observation : null} corners={stereo.corners.b} cornersOn={cornersOn} onChange={cameras.changeCamera} /></div>
                 {cameras.error && <div className="inline-error" role="alert"><TriangleAlert size={15} /><span>{cameras.error}</span><button aria-label="Скрыть сообщение" onClick={cameras.clearError}><X size={14} /></button></div>}
                 {stereo.processingError && <div className="inline-error" role="alert"><TriangleAlert size={15} /><span>{stereo.processingError}</span></div>}
                 <div className="order-block"><div className="order-header"><span>АВТОНАСТРОЙКА</span><button className="refresh-devices" onClick={() => void cameras.refresh()} disabled={cameras.busy || !cameras.devices.length} title="Обновить список устройств" aria-label="Обновить список устройств"><RefreshCw size={14} /></button></div>

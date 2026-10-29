@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import type { HamsterObservation } from '../lib/hamster';
+import type { Corner } from '../lib/corners';
 import type { CameraOrder, OrientationResult, PointCloudData, StereoSettings } from '../lib/stereo';
 import type { CombinedPayload, CombineStatus as WorkerCombineStatus, WorkerRequest, WorkerResponse } from '../lib/stereo.worker';
 import type { MappedQuad, SetupAssessment } from '../lib/stitch';
@@ -41,6 +42,14 @@ export interface PerfStats {
   /** Processing resolution after automatic quality scaling. */
   workWidth: number;
   workHeight: number;
+}
+
+export interface CornerViews {
+  /** Corners detected on the processed frame of each camera slot. */
+  a: Corner[];
+  b: Corner[];
+  /** Left-camera corners warped into the combined view. */
+  combined: Array<{ x: number; y: number }> | null;
 }
 
 export interface SetupProfile {
@@ -136,6 +145,7 @@ export function useStereo({ slots, videoA, videoB, active, baselineCm, horizonta
   const [setupAssessment, setSetupAssessment] = useState<SetupAssessment | null>(null);
   const [perf, setPerf] = useState<PerfStats>({ fps: 0, latencyMs: null, processingMs: null, skewMs: 0, workWidth: 256, workHeight: 192 });
   const [profileNote, setProfileNote] = useState<'loaded' | 'saved' | 'stale' | null>(null);
+  const [corners, setCorners] = useState<CornerViews>({ a: [], b: [], combined: null });
   const frameCounter = useRef(0);
   const [round, setRound] = useState(0);
   const profileRef = useRef<SetupProfile | null>(loadProfile());
@@ -170,6 +180,7 @@ export function useStereo({ slots, videoA, videoB, active, baselineCm, horizonta
     setBoxOnCombined(null);
     setPairMetrics(null);
     setSetupAssessment(null);
+    setCorners({ a: [], b: [], combined: null });
     setPerf({ fps: 0, latencyMs: null, processingMs: null, skewMs: 0, workWidth: 256, workHeight: 192 });
     qualityRef.current = 0;
     slowFramesRef.current = 0;
@@ -398,6 +409,7 @@ export function useStereo({ slots, videoA, videoB, active, baselineCm, horizonta
         attempts++;
         const result = message.result;
         setOrientation(result);
+        setCorners({ a: message.cornersA ?? [], b: message.cornersB ?? [], combined: null });
         setPairMetrics({
           matches: result.matches,
           overlapRatio: result.overlapRatio ?? 0,
@@ -454,6 +466,7 @@ export function useStereo({ slots, videoA, videoB, active, baselineCm, horizonta
         schedule(260);
       } else {
         setCloud(message.result);
+        setCorners({ a: message.cornersA ?? [], b: message.cornersB ?? [], combined: message.cornersCombined ?? null });
         // Detection, image and point cloud were all produced from this same pair.
         const observed = message.observation;
         setObservation(observed && observed.frameId === message.frameId && Date.now() - observed.capturedAt < 5000 ? observed : null);
@@ -511,5 +524,6 @@ export function useStereo({ slots, videoA, videoB, active, baselineCm, horizonta
     setupAssessment,
     perf,
     profileNote,
+    corners,
   };
 }

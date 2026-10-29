@@ -445,3 +445,12 @@ h1 { font-size: clamp(26px, 2.1vw, 32px); line-height: 1.2; letter-spacing: -.06
 @media (max-width: 1180px) {
   .formula-values { grid-template-columns: 1fr; }
 }
+
+/* ---- Purple corner marks ---- */
+.corner-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; }
+.corner-switch { display: flex; align-items: center; gap: 7px; }
+.corner-switch > span { color: #a8b6ac; font: 500 8px var(--mono); letter-spacing: .06em; }
+.corner-switch button { display: flex; align-items: center; gap: 6px; border: 1px solid #e2e8e2; background: #fff; color: #7c8b81; font-size: 9px; border-radius: 5px; padding: 6px 9px; }
+.corner-switch button i { width: 8px; height: 8px; border-radius: 2px; background: #d8d2e2; display: block; }
+.corner-switch button.selected { border-color: #cbb8f2; background: #f3eefe; color: #6c46b4; }
+.corner-switch button.selected i { background: #a855f7; box-shadow: 0 0 0 2px #a855f733; }

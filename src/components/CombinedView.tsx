@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { drawCornerMarks } from '../lib/corners';
 import type { MappedQuad } from '../lib/stitch';
 import type { CombinedPayload } from '../lib/stereo.worker';
 
@@ -6,6 +7,9 @@ interface Props {
   combined: CombinedPayload;
   box: MappedQuad | null;
   showBox: boolean;
+  /** Left-camera corners already warped into combined-view pixels. */
+  corners?: Array<{ x: number; y: number }> | null;
+  showCorners?: boolean;
 }
 
 /**
@@ -14,7 +18,7 @@ interface Props {
  * invented content. The hamster box is drawn as the quad produced by the same
  * geometric warp the image went through.
  */
-export default function CombinedView({ combined, box, showBox }: Props) {
+export default function CombinedView({ combined, box, showBox, corners, showCorners = true }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -50,8 +54,8 @@ export default function CombinedView({ combined, box, showBox }: Props) {
     image.data.set(pixels);
     context.putImageData(image, 0, 0);
 
+    const scale = canvas.width / 320;
     if (showBox && box) {
-      const scale = canvas.width / 320;
       context.lineWidth = 2 * scale;
       context.strokeStyle = box.confident ? '#d6ffb7' : '#ffd28a';
       context.shadowColor = '#12271a';
@@ -74,7 +78,12 @@ export default function CombinedView({ combined, box, showBox }: Props) {
       context.fillStyle = box.confident ? '#e2ffd0' : '#ffe6bd';
       context.fillText(text, labelX + 5 * scale, labelY + 10 * scale);
     }
-  }, [combined, box, showBox]);
+
+    if (showCorners && corners && corners.length) {
+      // Purple stroke marks on the corners, transferred by the same warp.
+      drawCornerMarks(context, corners, { size: 4 * scale, lineWidth: 1.6 * scale });
+    }
+  }, [combined, box, showBox, corners, showCorners]);
 
   return (
     <canvas

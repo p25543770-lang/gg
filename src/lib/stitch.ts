@@ -728,6 +728,21 @@ export function combinePlanar(
 }
 
 /**
+ * Transfer a single point from the left frame through the SAME warp the image
+ * went through (half its measured disparity towards the mid viewpoint).
+ */
+export function transferPointToCombined(point: { x: number; y: number }, mapping: ViewMapping): { x: number; y: number } {
+  if (mapping.kind === 'planar') return { ...point };
+  const w = mapping.width;
+  const h = mapping.height;
+  const x = clamp(Math.round(point.x), 0, w - 1);
+  const y = clamp(Math.round(point.y), 0, h - 1);
+  const index = y * w + x;
+  const d = mapping.confidence[index] / 255 >= 0.5 ? mapping.disparity[index] : 0;
+  return { x: point.x - d / 2 + mapping.shift, y: point.y };
+}
+
+/**
  * Transfer a detection box from the left frame through the SAME warp the
  * image went through. Outline points are mapped individually so the quad
  * follows depth changes instead of pretending the box is a rigid rectangle.
@@ -745,15 +760,7 @@ export function transferBoxToCombined(box: { left: number; top: number; right: n
     { x: (box.left + box.right) / 2 * w, y: box.bottom * h },
     { x: box.left * w, y: (box.top + box.bottom) / 2 * h },
   ];
-  const map = (point: { x: number; y: number }): { x: number; y: number } => {
-    if (mapping.kind === 'planar') return { ...point };
-    const x = clamp(Math.round(point.x), 0, w - 1);
-    const y = clamp(Math.round(point.y), 0, h - 1);
-    const index = y * w + x;
-    const d = mapping.confidence[index] / 255 >= 0.5 ? mapping.disparity[index] : 0;
-    return { x: point.x - d / 2 + mapping.shift, y: point.y };
-  };
-  const quad = corners.map(map);
+  const quad = corners.map((point) => transferPointToCombined(point, mapping));
   const xs = quad.map((p) => p.x);
   const ys = quad.map((p) => p.y);
   let conf = 0;

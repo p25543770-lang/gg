@@ -3,6 +3,7 @@ import * as ort from 'onnxruntime-web/wasm';
 import wasmUrl from 'onnxruntime-web/ort-wasm-simd-threaded.wasm?url';
 import { estimateHamsterDepth, extractRegion, hamsterSearchRegions, mapRegionBox, prepareHamsterInput, selectHamster, type HamsterBox, type HamsterObservation } from './hamster';
 import { inferCameraOrder, reconstructStereo, type CameraOrder, type Frame, type StereoSettings } from './stereo';
+import { detectCorners, type Corner } from './corners';
 import {
   buildDisparityField,
   combineFrames,
@@ -10,6 +11,7 @@ import {
   estimateHomography,
   photometricCompensation,
   transferBoxToCombined,
+  transferPointToCombined,
   type CombinedFrame,
   type MappedQuad,
 } from './stitch';
@@ -50,7 +52,7 @@ export type WorkerRequest =
   };
 
 export type WorkerResponse =
-  | { kind: 'detect'; result: ReturnType<typeof inferCameraOrder> }
+  | { kind: 'detect'; result: ReturnType<typeof inferCameraOrder>; cornersA: Corner[]; cornersB: Corner[] }
   | {
     kind: 'reconstruct';
     result: ReturnType<typeof reconstructStereo>;
@@ -59,6 +61,10 @@ export type WorkerResponse =
     combined: CombinedPayload | null;
     boxOnCombined: MappedQuad | null;
     combineStatus: CombineStatus;
+    cornersA: Corner[];
+    cornersB: Corner[];
+    /** Left-frame corners transferred into the combined view by the same warp. */
+    cornersCombined: Array<{ x: number; y: number }> | null;
   }
   | { kind: 'hamster-status'; status: 'ready' | 'error'; message?: string }
   | { kind: 'error'; message: string };
@@ -139,6 +145,7 @@ async function analyseHamster(left: Frame, result: ReturnType<typeof reconstruct
 interface CombineOutcome {
   combined: CombinedPayload | null;
   boxOnCombined: MappedQuad | null;
+  cornersCombined: Array<{ x: number; y: number }> | null;
   combineStatus: CombineStatus;
   transfer: Transferable[];
 }
@@ -168,13 +175,14 @@ function combinePair(
   right: Frame,
   settings: StereoSettings,
   box: HamsterBox | null,
+  leftCorners: Corner[],
 ): CombineOutcome {
   const transfer: Transferable[] = [];
   const field = buildDisparityField(left, right, settings.verticalOffset, Math.floor(left.width * 0.3));
   const photometric = photometricCompensation(left, right, field.inlierMatches);
 
   if (field.matchCount < 12) {
-    return { combined: null, boxOnCombined: null, combineStatus: 'insufficient', transfer };
+    return { combined: null, boxOnCombined: null, cornersCombined: null, combineStatus: 'insufficient', transfer };
   }
 
   let frame: CombinedFrame;
@@ -189,7 +197,7 @@ function combinePair(
     const points = field.inlierMatches.map((m) => ({ from: { x: m.xr, y: m.yr }, to: { x: m.x, y: m.y } }));
     const fit = estimateHomography(points);
     if (!fit) {
-      return { combined: null, boxOnCombined: null, combineStatus: 'insufficient', transfer };
+      return { combined: null, boxOnCombined: null, cornersCombined: null, combineStatus: 'insufficient', transfer };
     }
     frame = combinePlanar(left, right, fit.h, photometric);
     status = 'planar';
@@ -197,6 +205,8 @@ function combinePair(
   return {
     combined: toPayload(frame, transfer),
     boxOnCombined: box ? transferBoxToCombined(box, frame.mapping) : null,
+    // Corner marks follow the image through the very same geometric warp.
+    cornersCombined: leftCorners.length ? leftCorners.map((corner) => transferPointToCombined(corner, frame.mapping)) : [],
     combineStatus: status,
     transfer,
   };
@@ -211,12 +221,16 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
     }
     const frameA: Frame = { width: request.width, height: request.height, data: new Uint8ClampedArray(request.a) };
     const frameB: Frame = { width: request.width, height: request.height, data: new Uint8ClampedArray(request.b) };
+    // Both cameras look for corners on their own frames every cycle.
+    const cornersA = detectCorners(frameA);
+    const cornersB = detectCorners(frameB);
     if (request.kind === 'detect') {
-      self.postMessage({ kind: 'detect', result: inferCameraOrder(frameA, frameB) } satisfies WorkerResponse);
+      self.postMessage({ kind: 'detect', result: inferCameraOrder(frameA, frameB), cornersA, cornersB } satisfies WorkerResponse);
     } else {
       if (!request.order || !request.settings) throw new Error('Missing stereo settings');
       const left = request.order === 'a-left' ? frameA : frameB;
       const right = request.order === 'a-left' ? frameB : frameA;
+      const leftCorners = request.order === 'a-left' ? cornersA : cornersB;
       const result = reconstructStereo(left, right, request.settings);
       // The detailed detector image and the stereo left image originate from
       // the same captured 4:3 snapshot; only their resolution differs.
@@ -224,7 +238,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         ? { width: request.detail.width, height: request.detail.height, data: new Uint8ClampedArray(request.detail.data) }
         : left;
       const observation = await analyseHamster(detectorFrame, result, request);
-      const combined = combinePair(left, right, request.settings, observation?.box ?? null);
+      const combined = combinePair(left, right, request.settings, observation?.box ?? null, leftCorners);
       const transfer: Transferable[] = [
         result.positions.buffer,
         result.rgbColors.buffer,
@@ -242,6 +256,9 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         combined: combined.combined,
         boxOnCombined: combined.boxOnCombined,
         combineStatus: combined.combineStatus,
+        cornersA,
+        cornersB,
+        cornersCombined: combined.cornersCombined,
       } satisfies WorkerResponse, { transfer });
     }
   } catch (error) {
