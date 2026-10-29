@@ -13,11 +13,12 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download 40895718426 --name Stereo-Space-Windows-x64 --dir release
+        run: gh run download 40896408102 --name Stereo-Space-Windows-x64 --dir release
       - name: Publish executable
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $exe = (Get-ChildItem release/*.exe).FullName
-          gh release create v1.0.0-windows $exe --target 2f4f41c295cedbe9c5cb5ff40f899f5760ac1615 --title "Stereo Space 1.0.0 — Windows x64" --notes "Portable Windows x64 executable. Built and tested on Windows by GitHub Actions run 40895718426. No Node.js or manual server required; ONNX model and WASM are bundled for offline processing. Unsigned build: SmartScreen may warn. GUI launch, physical cameras and real hamster detection have not been validated."
+          $target = $env:GITHUB_SHA
+          gh release create v1.0.0-windows $exe --target $target --title "Stereo Space 1.0.0 — Windows x64" --notes "Portable Windows x64 executable. Application code is unchanged from commit 54f991fa70e7e1fed46721f85b419b92afef6936; built and tested on Windows by GitHub Actions run 40896408102. This release also includes the updated PROMPT.md. The new automatic-calibration and unified-3D-map requirements in that prompt are not implemented by this release. No Node.js or manual server required; ONNX model and WASM are bundled for offline processing. Unsigned build: SmartScreen may warn. GUI launch, physical cameras and real hamster detection have not been validated."
