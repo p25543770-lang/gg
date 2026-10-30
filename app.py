@@ -7,7 +7,7 @@ from tkinter import ttk
 import cv2
 from PIL import Image, ImageTk
 
-from edges import highlight_edges
+from camera_stream import CameraStream
 from frame_stats import FrameStats
 
 
@@ -15,7 +15,7 @@ class CameraPanel(ttk.LabelFrame):
     def __init__(self, parent, app, title, default_index):
         super().__init__(parent, text=title, padding=8)
         self.app = app
-        self.camera = None
+        self.stream = None
         self.open_index = None
         self.timer = None
         self.photo = None
@@ -48,52 +48,45 @@ class CameraPanel(ttk.LabelFrame):
         except ValueError:
             self.status.set('Введите номер камеры от 0 до 20.')
             return
-        if any(panel is not self and panel.open_index == index for panel in self.app.panels):
-            self.status.set('Эта камера уже открыта в соседней панели. Выберите другой номер.')
+        if self.app.camera_busy(index):
+            self.status.set('Эта камера уже открыта или ещё закрывается. Выберите другой номер.')
             return
         self.release()
-        # DirectShow avoids slow Media Foundation device initialization on Windows.
-        self.camera = cv2.VideoCapture(index, cv2.CAP_DSHOW if sys.platform == 'win32' else cv2.CAP_ANY)
-        if not self.camera.isOpened():
-            self.release()
-            self.status.set('Не удалось открыть камеру. Попробуйте другой номер.')
-            return
         self.open_index = index
-        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        self.status.set(f'Камера {index} открыта.')
+        self.stream = CameraStream(index)
+        self.app.streams.append(self.stream)
+        self.stream.start()
+        self.status.set(f'Открытие камеры {index}…')
         self.update_frame()
 
     def update_frame(self):
         self.timer = None
-        if self.camera is None:
+        if self.stream is None:
             return
-        started = time.perf_counter()
-        ok, frame = self.camera.read()
-        if not ok:
+        self.stream.configure(self.app.sensitivity.get(), self.preview.winfo_width(), self.preview.winfo_height())
+        state, result = self.stream.poll()
+        if state not in ('open', 'opening'):
             self.release()
-            self.status.set('Не удалось получить кадр. Проверьте подключение камеры.')
+            self.status.set(state)
             return
-        h, w = frame.shape[:2]
-        highlight_edges(frame, self.app.sensitivity.get())
-        # Fit each image in its own panel without changing the aspect ratio.
-        available_w = max(self.preview.winfo_width(), 1)
-        available_h = max(self.preview.winfo_height(), 1)
-        scale = min(available_w / w, available_h / h, 1)
-        frame = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))))
-        self.photo = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
-        self.preview.configure(image=self.photo, text='')
-        self.frame_stats.add(started, time.perf_counter())
-        self.metrics.set(self.frame_stats.text())
-        self.timer = self.app.root.after(30, self.update_frame)
+        if state == 'open':
+            self.status.set(f'Камера {self.open_index} открыта.')
+        if result is not None:
+            rgb, started = result
+            self.photo = ImageTk.PhotoImage(Image.fromarray(rgb))
+            self.preview.configure(image=self.photo, text='')
+            self.frame_stats.add(started, time.perf_counter())
+            self.metrics.set(self.frame_stats.text())
+        # Short polling interval; frame production is capped separately at 30 FPS.
+        self.timer = self.app.root.after(10, self.update_frame)
 
     def release(self):
         if self.timer is not None:
             self.app.root.after_cancel(self.timer)
             self.timer = None
-        if self.camera is not None:
-            self.camera.release()
-            self.camera = None
+        if self.stream is not None:
+            self.stream.stop()
+            self.stream = None
         self.open_index = None
         self.preview.configure(image='', text='Камера не открыта')
         self.photo = None
@@ -105,6 +98,7 @@ class CameraPanel(ttk.LabelFrame):
 class CameraApp:
     def __init__(self, root):
         self.root = root
+        self.streams = []
         root.title('Камеры — фиолетовые контуры')
         root.protocol('WM_DELETE_WINDOW', self.close)
 
@@ -123,6 +117,12 @@ class CameraApp:
         for column, panel in enumerate(self.panels):
             panel.grid(row=0, column=column, sticky='nsew', padx=(0, 5) if column == 0 else (5, 0))
 
+    def camera_busy(self, index):
+        # A stopped capture may still be blocked in the driver; don't reopen it
+        # until its owner thread has released the device.
+        self.streams = [stream for stream in self.streams if stream.alive()]
+        return any(stream.index == index for stream in self.streams)
+
     def close(self):
         for panel in self.panels:
             panel.release()
@@ -130,15 +130,17 @@ class CameraApp:
 
 
 def self_test():
-    """Exercise both packaged previews independently, without physical cameras."""
+    """Exercise two asynchronous packaged previews without physical cameras."""
     import numpy as np
+
+    cameras = {}
 
     class FakeCamera:
         def __init__(self, index, backend):
             self.index = index
             self.released = False
             self.fail_read = False
-            self.frame = None
+            cameras[index] = self
 
         def isOpened(self):
             return True
@@ -147,56 +149,54 @@ def self_test():
             return True
 
         def read(self):
+            time.sleep(0.02)
             if self.fail_read:
                 return False, None
-            self.frame = np.zeros((100, 100, 3), dtype=np.uint8)
-            self.frame[25:75, 25:75] = 255
-            return True, self.frame
+            frame = np.zeros((100, 100, 3), dtype=np.uint8)
+            frame[25:75, 25:75] = 255
+            return True, frame
 
         def release(self):
             self.released = True
+
+    def wait_until(predicate):
+        deadline = time.perf_counter() + 5
+        while not predicate():
+            root.update()
+            if time.perf_counter() >= deadline:
+                raise AssertionError('Timed out waiting for camera preview')
+            time.sleep(0.01)
 
     root = tk.Tk()
     root.withdraw()
     app = CameraApp(root)
     original_capture = cv2.VideoCapture
     cv2.VideoCapture = FakeCamera
+    streams = []
     try:
         left, right = app.panels
         left.open_camera()
         right.open_camera()
-        left_camera, right_camera = left.camera, right.camera
-        assert left_camera.index == 0 and right_camera.index == 1
-        for panel, camera in ((left, left_camera), (right, right_camera)):
-            assert tuple(camera.frame[0, 0]) == (0, 0, 0)
-            assert tuple(camera.frame[50, 50]) == (255, 255, 255)
-            assert np.any(np.all(camera.frame[20:30, 30:70] == (180, 0, 140), axis=2))
-            assert panel.photo is not None and panel.timer is not None
-            assert len(panel.frame_stats.timestamps) == 1
-            assert 'FPS: —' in panel.metrics.get() and 'мс' in panel.metrics.get()
-        root.after_cancel(right.timer)
-        right.timer = None
-        right.update_frame()
-        assert len(right.frame_stats.timestamps) == 2
-        assert right.metrics.get() == right.frame_stats.text()
-        assert len(left.frame_stats.timestamps) == 1
-        # Refuse to open the same camera twice without disturbing either stream.
+        streams = app.streams[:]
+        wait_until(lambda: len(left.frame_stats.timestamps) >= 2 and len(right.frame_stats.timestamps) >= 2)
+        assert left.photo is not None and right.photo is not None
+        assert 'FPS: —' not in left.metrics.get() and 'FPS: —' not in right.metrics.get()
         right.index.set('0')
         right.open_camera()
-        assert left.camera is left_camera and right.camera is right_camera
-        # Failure of one stream should not release the other.
-        root.after_cancel(left.timer)
-        left.timer = None
-        left_camera.fail_read = True
-        left.update_frame()
-        assert left_camera.released and left.camera is None
-        assert not left.frame_stats.timestamps and left.metrics.get() == left.frame_stats.text()
-        assert right.camera is right_camera and right.timer is not None
-        assert len(right.frame_stats.timestamps) == 2
+        assert right.stream is streams[1] and left.stream is streams[0]
+        cameras[0].fail_read = True
+        wait_until(lambda: left.stream is None)
+        assert not left.frame_stats.timestamps
+        assert right.stream is streams[1]
+        count = len(right.frame_stats.timestamps)
+        wait_until(lambda: len(right.frame_stats.timestamps) > count)
     finally:
-        cv2.VideoCapture = original_capture
         app.close()
-    assert right_camera.released
+        for stream in streams:
+            stream.capture_thread.join(2)
+            stream.process_thread.join(2)
+        cv2.VideoCapture = original_capture
+    assert cameras[0].released and cameras[1].released
 
 
 if __name__ == '__main__':

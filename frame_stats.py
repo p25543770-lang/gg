@@ -18,11 +18,11 @@ class FrameStats:
 
     def text(self):
         if not self.durations:
-            return 'FPS: —  |  Получение + обработка: —'
+            return 'FPS: —  |  Чтение + обработка + ожидание: —'
         fps = '—'
         if len(self.timestamps) > 1:
             elapsed = self.timestamps[-1] - self.timestamps[0]
             if elapsed > 0:
                 fps = f'{(len(self.timestamps) - 1) / elapsed:.1f}'
         ms = sum(self.durations) * 1000 / len(self.durations)
-        return f'FPS: {fps}  |  Получение + обработка: {ms:.1f} мс'
+        return f'FPS: {fps}  |  Чтение + обработка + ожидание: {ms:.1f} мс'
