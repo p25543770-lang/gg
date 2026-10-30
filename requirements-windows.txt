@@ -1,0 +1,5 @@
+# Tested together with PyInstaller on Python 3.12 for Windows x64.
+numpy==1.26.4
+opencv-python==4.10.0.84
+Pillow==11.1.0
+pyinstaller==6.11.1
