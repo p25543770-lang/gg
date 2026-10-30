@@ -68,7 +68,7 @@ class CameraPanel(ttk.LabelFrame):
         self.timer = None
         if self.camera is None:
             return
-        started = time.monotonic()
+        started = time.perf_counter()
         ok, frame = self.camera.read()
         if not ok:
             self.release()
@@ -83,7 +83,7 @@ class CameraPanel(ttk.LabelFrame):
         frame = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))))
         self.photo = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
         self.preview.configure(image=self.photo, text='')
-        self.frame_stats.add(started, time.monotonic())
+        self.frame_stats.add(started, time.perf_counter())
         self.metrics.set(self.frame_stats.text())
         self.timer = self.app.root.after(30, self.update_frame)
 
@@ -178,7 +178,7 @@ def self_test():
         right.timer = None
         right.update_frame()
         assert len(right.frame_stats.timestamps) == 2
-        assert 'FPS: —' not in right.metrics.get()
+        assert right.metrics.get() == right.frame_stats.text()
         assert len(left.frame_stats.timestamps) == 1
         # Refuse to open the same camera twice without disturbing either stream.
         right.index.set('0')
@@ -201,7 +201,13 @@ def self_test():
 
 if __name__ == '__main__':
     if '--self-test' in sys.argv:
-        self_test()
+        try:
+            self_test()
+        except Exception:
+            import traceback
+            with open('self-test-error.txt', 'w', encoding='utf-8') as error_file:
+                traceback.print_exc(file=error_file)
+            sys.exit(1)
         sys.exit(0)
     root = tk.Tk()
     root.geometry('1200x650')

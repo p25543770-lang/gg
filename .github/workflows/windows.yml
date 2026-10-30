@@ -41,6 +41,7 @@ jobs:
           }
           if ($process.ExitCode -ne 0) {
             $detail = (Get-Content test-err.txt -Raw) -replace "`r?`n", ' | '
+            if (Test-Path self-test-error.txt) { $detail += (Get-Content self-test-error.txt -Raw) -replace "`r?`n", ' | ' }
             Write-Output "::error::Self-test failed: exit code $($process.ExitCode). $detail"
             exit 1
           }
