@@ -5,15 +5,22 @@ on:
     branches: ['**']
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional new tag for publishing a prerelease (e.g. purple-corners-v1.0.0)'
+        required: false
+        type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -42,3 +49,15 @@ jobs:
           path: dist/PurpleCorners.exe
           if-no-files-found: error
           retention-days: 90
+      - name: Publish prerelease (manual runs only)
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^purple-corners-v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$') {
+            throw 'Invalid release tag; expected e.g. purple-corners-v1.0.0'
+          }
+          gh release create $env:RELEASE_TAG dist/PurpleCorners.exe --target $env:GITHUB_SHA --prerelease --title "Purple Corners for Windows $env:RELEASE_TAG" --notes "Windows x64. Download PurpleCorners.exe and double-click it; Python is not required. The packaged UI and synthetic frame were tested in GitHub Actions; a physical camera was not tested."
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
