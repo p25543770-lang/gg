@@ -10,6 +10,9 @@ from PIL import Image, ImageTk
 from camera_stream import CameraStream
 from frame_stats import FrameStats
 
+# Avoid oversubscribing CPU cores while two cameras process frames concurrently.
+cv2.setNumThreads(1)
+
 
 class CameraPanel(ttk.LabelFrame):
     def __init__(self, parent, app, title, default_index):
@@ -28,6 +31,10 @@ class CameraPanel(ttk.LabelFrame):
         ttk.Spinbox(controls, from_=0, to=20, width=4, textvariable=self.index).pack(side='left', padx=5)
         ttk.Button(controls, text='Открыть', command=self.open_camera).pack(side='left', padx=2)
         ttk.Button(controls, text='Закрыть', command=self.release).pack(side='left', padx=2)
+        self.manual_exposure = tk.BooleanVar(value=(sys.platform == 'win32'))
+        ttk.Checkbutton(self, text='Экспозиция 1/32 с (при открытии, может затемнить)',
+                        variable=self.manual_exposure,
+                        state='normal' if sys.platform == 'win32' else 'disabled').pack(anchor='w', pady=(5, 0))
 
         # Do not let the current image force the two panels to grow indefinitely.
         preview_area = ttk.Frame(self, width=320, height=240)
@@ -53,7 +60,7 @@ class CameraPanel(ttk.LabelFrame):
             return
         self.release()
         self.open_index = index
-        self.stream = CameraStream(index)
+        self.stream = CameraStream(index, manual_exposure=self.manual_exposure.get())
         self.app.streams.append(self.stream)
         self.stream.start()
         self.status.set(f'Открытие камеры {index}…')
@@ -64,20 +71,20 @@ class CameraPanel(ttk.LabelFrame):
         if self.stream is None:
             return
         self.stream.configure(self.app.sensitivity.get(), self.preview.winfo_width(), self.preview.winfo_height())
-        state, result = self.stream.poll()
+        state, result, notice = self.stream.poll()
         if state not in ('open', 'opening'):
             self.release()
             self.status.set(state)
             return
         if state == 'open':
-            self.status.set(f'Камера {self.open_index} открыта.')
+            self.status.set(f'Камера {self.open_index} открыта.' + (f' {notice}' if notice else ''))
         if result is not None:
-            rgb, started = result
+            rgb, started, acquired = result
             self.photo = ImageTk.PhotoImage(Image.fromarray(rgb))
             self.preview.configure(image=self.photo, text='')
-            self.frame_stats.add(started, time.perf_counter())
+            self.frame_stats.add(started, acquired, time.perf_counter())
             self.metrics.set(self.frame_stats.text())
-        # Short polling interval; frame production is capped separately at 30 FPS.
+        # Keep the UI responsive and pick up the most recent processed frame.
         self.timer = self.app.root.after(10, self.update_frame)
 
     def release(self):
@@ -126,6 +133,9 @@ class CameraApp:
     def close(self):
         for panel in self.panels:
             panel.release()
+        # Give capture threads a bounded chance to restore camera settings.
+        for stream in self.streams:
+            stream.capture_thread.join(timeout=0.5)
         self.root.destroy()
 
 
@@ -147,6 +157,9 @@ def self_test():
 
         def set(self, prop, value):
             return True
+
+        def get(self, prop):
+            return 0.75 if prop == cv2.CAP_PROP_AUTO_EXPOSURE else -5
 
         def read(self):
             time.sleep(0.02)
