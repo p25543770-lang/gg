@@ -16,7 +16,7 @@
 Установите 64-битный Python 3.12 и выполните в папке проекта:
 
 ```bat
-py -3.12 -m pip install -r requirements.txt pyinstaller==6.11.1
+py -3.12 -m pip install -r requirements-windows.txt
 py -3.12 -m PyInstaller --noconfirm --clean --onefile --windowed --name PurpleCorners app.py
 ```
 
