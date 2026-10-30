@@ -65,5 +65,5 @@ jobs:
           if ($env:RELEASE_TAG -notmatch '^purple-corners-v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$') {
             throw 'Invalid release tag; expected e.g. purple-corners-v1.0.0'
           }
-          gh release create $env:RELEASE_TAG dist/PurpleCorners.exe --target $env:GITHUB_SHA --prerelease --title "Purple Corners for Windows $env:RELEASE_TAG" --notes "Windows x64. Purple contours mark contrast edges of objects and surfaces, not only road boundaries. Download PurpleCorners.exe and double-click it; Python is not required. The packaged UI and synthetic frame were tested in GitHub Actions; a physical camera was not tested. Do not rely on it as a safety system."
+          gh release create $env:RELEASE_TAG dist/PurpleCorners.exe --target $env:GITHUB_SHA --prerelease --title "Purple Corners for Windows $env:RELEASE_TAG" --notes "Windows x64. Two side-by-side camera previews with purple contrast edges of objects and surfaces, not only road boundaries. Download PurpleCorners.exe and double-click it; Python is not required. Both packaged previews and synthetic frames were tested in GitHub Actions; a physical camera was not tested. Do not rely on it as a safety system."
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
