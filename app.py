@@ -1,4 +1,4 @@
-"""Live camera preview with purple corners."""
+"""Live camera preview with purple object edges."""
 import sys
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -6,11 +6,13 @@ from tkinter import messagebox, ttk
 import cv2
 from PIL import Image, ImageTk
 
+from edges import highlight_edges
+
 
 class CameraApp:
     def __init__(self, root):
         self.root = root
-        root.title('Камера — фиолетовые углы')
+        root.title('Камера — фиолетовые контуры')
         root.protocol('WM_DELETE_WINDOW', self.close)
         self.camera = None
         self.timer = None
@@ -22,9 +24,9 @@ class CameraApp:
         self.index = tk.StringVar(value='0')
         ttk.Spinbox(controls, from_=0, to=20, width=4, textvariable=self.index).pack(side='left', padx=5)
         ttk.Button(controls, text='Открыть камеру', command=self.open_camera).pack(side='left', padx=5)
-        ttk.Label(controls, text='Размер углов:').pack(side='left', padx=(15, 0))
-        self.size = tk.IntVar(value=15)
-        ttk.Scale(controls, from_=5, to=35, variable=self.size, orient='horizontal').pack(side='left', fill='x', expand=True, padx=5)
+        ttk.Label(controls, text='Чувствительность контуров:').pack(side='left', padx=(15, 0))
+        self.sensitivity = tk.IntVar(value=50)
+        ttk.Scale(controls, from_=1, to=100, variable=self.sensitivity, orient='horizontal').pack(side='left', fill='x', expand=True, padx=5)
         self.preview = ttk.Label(root, anchor='center', text='Нажмите «Открыть камеру»')
         self.preview.pack(fill='both', expand=True, padx=10, pady=(0, 10))
         self.status = tk.StringVar(value='Подключите Logitech C930e и выберите её номер.')
@@ -60,14 +62,7 @@ class CameraApp:
             self.status.set('Не удалось получить кадр. Проверьте подключение камеры.')
             return
         h, w = frame.shape[:2]
-        dx, dy = int(w * self.size.get() / 100), int(h * self.size.get() / 100)
-        purple = (180, 0, 140)  # BGR
-        import numpy as np
-        for points in ([(0, 0), (dx, 0), (0, dy)],
-                       [(w-1, 0), (w-1-dx, 0), (w-1, dy)],
-                       [(0, h-1), (dx, h-1), (0, h-1-dy)],
-                       [(w-1, h-1), (w-1-dx, h-1), (w-1, h-1-dy)]):
-            cv2.fillPoly(frame, [np.array(points, dtype=np.int32)], purple)
+        highlight_edges(frame, self.sensitivity.get())
         # Keep the preview within the window while retaining the aspect ratio.
         available_w = max(self.preview.winfo_width(), 640)
         available_h = max(self.preview.winfo_height(), 360)
@@ -99,6 +94,7 @@ def self_test():
     class FakeCamera:
         def __init__(self):
             self.frame = np.zeros((100, 100, 3), dtype=np.uint8)
+            self.frame[25:75, 25:75] = 255
             self.released = False
 
         def read(self):
@@ -114,8 +110,9 @@ def self_test():
     app.camera = camera
     try:
         app.update_frame()
-        assert tuple(camera.frame[0, 0]) == (180, 0, 140)
-        assert tuple(camera.frame[50, 50]) == (0, 0, 0)
+        assert tuple(camera.frame[0, 0]) == (0, 0, 0)
+        assert tuple(camera.frame[50, 50]) == (255, 255, 255)
+        assert np.any(np.all(camera.frame[20:30, 30:70] == (180, 0, 140), axis=2))
         assert app.photo is not None and app.timer is not None
     finally:
         app.close()
