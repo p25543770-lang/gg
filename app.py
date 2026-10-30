@@ -92,7 +92,40 @@ class CameraApp:
         self.root.destroy()
 
 
+def self_test():
+    """Exercise the packaged UI and image pipeline without a physical camera."""
+    import numpy as np
+
+    class FakeCamera:
+        def __init__(self):
+            self.frame = np.zeros((100, 100, 3), dtype=np.uint8)
+            self.released = False
+
+        def read(self):
+            return True, self.frame
+
+        def release(self):
+            self.released = True
+
+    root = tk.Tk()
+    root.withdraw()
+    app = CameraApp(root)
+    camera = FakeCamera()
+    app.camera = camera
+    try:
+        app.update_frame()
+        assert tuple(camera.frame[0, 0]) == (180, 0, 140)
+        assert tuple(camera.frame[50, 50]) == (0, 0, 0)
+        assert app.photo is not None and app.timer is not None
+    finally:
+        app.close()
+    assert camera.released
+
+
 if __name__ == '__main__':
+    if '--self-test' in sys.argv:
+        self_test()
+        sys.exit(0)
     root = tk.Tk()
     root.geometry('1000x650')
     CameraApp(root)
