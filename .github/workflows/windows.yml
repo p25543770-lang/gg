@@ -32,7 +32,11 @@ jobs:
             $process.Kill()
             throw 'Self-test timed out'
           }
-          if ($process.ExitCode -ne 0) { throw "Self-test failed: exit code $($process.ExitCode). $(Get-Content test-err.txt -Raw)" }
+          if ($process.ExitCode -ne 0) {
+            $detail = (Get-Content test-err.txt -Raw) -replace "`r?`n", ' | '
+            Write-Output "::error::Self-test failed: exit code $($process.ExitCode). $detail"
+            exit 1
+          }
       - name: Upload Windows executable
         uses: actions/upload-artifact@v4
         with:
