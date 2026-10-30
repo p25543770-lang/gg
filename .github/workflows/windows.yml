@@ -27,12 +27,12 @@ jobs:
       - name: Smoke-test packaged application (no camera required)
         shell: pwsh
         run: |
-          $process = Start-Process -FilePath "$PWD\dist\PurpleCorners.exe" -ArgumentList '--self-test' -PassThru
+          $process = Start-Process -FilePath "$PWD\dist\PurpleCorners.exe" -ArgumentList '--self-test' -PassThru -RedirectStandardOutput test-out.txt -RedirectStandardError test-err.txt
           if (-not $process.WaitForExit(120000)) {
             $process.Kill()
             throw 'Self-test timed out'
           }
-          if ($process.ExitCode -ne 0) { throw "Self-test failed: exit code $($process.ExitCode)" }
+          if ($process.ExitCode -ne 0) { throw "Self-test failed: exit code $($process.ExitCode). $(Get-Content test-err.txt -Raw)" }
       - name: Upload Windows executable
         uses: actions/upload-artifact@v4
         with:
