@@ -2,10 +2,8 @@
 import threading
 import time
 import unittest
-from unittest.mock import patch
 
 import cv2
-import camera_stream
 import numpy as np
 
 from camera_stream import CameraStream
@@ -17,8 +15,7 @@ class FakeCamera:
         self.fail = fail
         self.count = 0
         self.released = False
-        self.properties = {cv2.CAP_PROP_AUTO_EXPOSURE: 0.75, cv2.CAP_PROP_EXPOSURE: -7}
-        self.history = []
+        self.properties = {}
         self.lock = threading.Lock()
 
     def isOpened(self):
@@ -26,7 +23,6 @@ class FakeCamera:
 
     def set(self, prop, value):
         self.properties[prop] = value
-        self.history.append((prop, value))
         return True
 
     def get(self, prop):
@@ -78,6 +74,8 @@ class StreamTests(unittest.TestCase):
             self.assertLess((current - most_recent) % 256, 15)
             self.assertEqual(fast.properties[cv2.CAP_PROP_FRAME_WIDTH], 640)
             self.assertEqual(fast.properties[cv2.CAP_PROP_FRAME_HEIGHT], 480)
+            self.assertNotIn(cv2.CAP_PROP_AUTO_EXPOSURE, fast.properties)
+            self.assertNotIn(cv2.CAP_PROP_EXPOSURE, fast.properties)
             self.assertEqual(fast.properties[cv2.CAP_PROP_FPS], 30)
             self.assertEqual(fast.properties[cv2.CAP_PROP_FOURCC], cv2.VideoWriter_fourcc(*'MJPG'))
             self.assertEqual(streams[1].poll()[0], 'open')
@@ -105,52 +103,6 @@ class StreamTests(unittest.TestCase):
             self.assertEqual(rgb.shape[:2], (32, 32))
         finally:
             self.stop(stream)
-
-    def test_manual_exposure_request_and_restoration_on_windows(self):
-        camera = FakeCamera()
-        with patch.object(camera_stream.sys, 'platform', 'win32'):
-            stream = CameraStream(0, lambda *_: camera, manual_exposure=True)
-            stream.start()
-            try:
-                deadline = time.perf_counter() + 2
-                while stream.poll()[0] != 'open' and time.perf_counter() < deadline:
-                    time.sleep(0.01)
-                self.assertIn((cv2.CAP_PROP_AUTO_EXPOSURE, 0.25), camera.history)
-                self.assertIn((cv2.CAP_PROP_EXPOSURE, -5), camera.history)
-                self.assertEqual(stream.poll()[2], '')
-            finally:
-                self.stop(stream)
-        self.assertEqual(camera.properties[cv2.CAP_PROP_AUTO_EXPOSURE], 0.75)
-        self.assertTrue(camera.released)
-
-    def test_unknown_exposure_mode_is_not_changed(self):
-        camera = FakeCamera()
-        camera.properties[cv2.CAP_PROP_AUTO_EXPOSURE] = 0
-        with patch.object(camera_stream.sys, 'platform', 'win32'):
-            stream = CameraStream(0, lambda *_: camera, manual_exposure=True)
-            stream.start()
-            try:
-                deadline = time.perf_counter() + 2
-                while stream.poll()[0] != 'open' and time.perf_counter() < deadline:
-                    time.sleep(0.01)
-                self.assertIn('экспозиции', stream.poll()[2])
-                self.assertNotIn(cv2.CAP_PROP_AUTO_EXPOSURE, [prop for prop, _ in camera.history])
-            finally:
-                self.stop(stream)
-
-    def test_auto_exposure_untouched_when_unchecked(self):
-        camera = FakeCamera()
-        with patch.object(camera_stream.sys, 'platform', 'win32'):
-            stream = CameraStream(0, lambda *_: camera, manual_exposure=False)
-            stream.start()
-            try:
-                deadline = time.perf_counter() + 2
-                while stream.poll()[0] != 'open' and time.perf_counter() < deadline:
-                    time.sleep(0.01)
-                self.assertNotIn(cv2.CAP_PROP_AUTO_EXPOSURE, [prop for prop, _ in camera.history])
-                self.assertNotIn(cv2.CAP_PROP_EXPOSURE, [prop for prop, _ in camera.history])
-            finally:
-                self.stop(stream)
 
     def test_failed_camera_does_not_stop_other(self):
         failed, good = FakeCamera(fail=True), FakeCamera()

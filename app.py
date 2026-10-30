@@ -23,6 +23,7 @@ class CameraPanel(ttk.LabelFrame):
         self.requested_resolution = None
         self.actual_resolution = None
         self.timer = None
+        self.reopen_timer = None
         self.photo = None
         self.frame_stats = FrameStats()
 
@@ -39,11 +40,7 @@ class CameraPanel(ttk.LabelFrame):
         self.resolution = tk.StringVar(value='640×480')
         ttk.Combobox(resolution_controls, textvariable=self.resolution, width=12, state='readonly',
                      values=('320×240', '640×480', '1280×720', '1920×1080')).pack(side='left', padx=5)
-        ttk.Label(resolution_controls, text='(применяется при открытии)').pack(side='left')
-        self.manual_exposure = tk.BooleanVar(value=(sys.platform == 'win32'))
-        ttk.Checkbutton(self, text='Экспозиция 1/32 с (при открытии, может затемнить)',
-                        variable=self.manual_exposure,
-                        state='normal' if sys.platform == 'win32' else 'disabled').pack(anchor='w', pady=(5, 0))
+        ttk.Button(resolution_controls, text='Применить', command=self.apply_resolution).pack(side='left', padx=5)
 
         # Do not let the current image force the two panels to grow indefinitely.
         preview_area = ttk.Frame(self, width=320, height=240)
@@ -57,6 +54,9 @@ class CameraPanel(ttk.LabelFrame):
         ttk.Label(self, textvariable=self.status, wraplength=450).pack(fill='x', pady=(8, 0))
 
     def open_camera(self):
+        if self.reopen_timer is not None:
+            self.app.root.after_cancel(self.reopen_timer)
+            self.reopen_timer = None
         try:
             index = int(self.index.get())
             if not 0 <= index <= 20:
@@ -70,8 +70,7 @@ class CameraPanel(ttk.LabelFrame):
         self.release()
         self.open_index = index
         self.requested_resolution = tuple(map(int, self.resolution.get().split('×')))
-        self.stream = CameraStream(index, manual_exposure=self.manual_exposure.get(),
-                                   resolution=self.requested_resolution)
+        self.stream = CameraStream(index, resolution=self.requested_resolution)
         self.app.streams.append(self.stream)
         self.stream.start()
         self.status.set(f'Открытие камеры {index}…')
@@ -102,11 +101,35 @@ class CameraPanel(ttk.LabelFrame):
                     status += ' Камера выбрала другое разрешение.'
             if notice:
                 status += f' {notice}'
-            self.status.set(status)
+            if self.status.get() != status:
+                self.status.set(status)
         # Keep the UI responsive and pick up the most recent processed frame.
-        self.timer = self.app.root.after(10, self.update_frame)
+        self.timer = self.app.root.after(2, self.update_frame)
+
+    def apply_resolution(self):
+        if self.stream is None:
+            self.status.set('Выберите разрешение и нажмите «Открыть».')
+            return
+        index = self.open_index
+        self.release()
+        self.index.set(str(index))
+        self.status.set('Перезапуск камеры с новым разрешением…')
+        self._reopen_when_released(index, time.perf_counter() + 5)
+
+    def _reopen_when_released(self, index, deadline):
+        self.reopen_timer = None
+        if not self.app.camera_busy(index):
+            self.index.set(str(index))
+            self.open_camera()
+        elif time.perf_counter() >= deadline:
+            self.status.set('Камера ещё закрывается. Попробуйте открыть её снова.')
+        else:
+            self.reopen_timer = self.app.root.after(25, self._reopen_when_released, index, deadline)
 
     def release(self):
+        if self.reopen_timer is not None:
+            self.app.root.after_cancel(self.reopen_timer)
+            self.reopen_timer = None
         if self.timer is not None:
             self.app.root.after_cancel(self.timer)
             self.timer = None
@@ -224,6 +247,16 @@ def self_test():
         assert left.actual_resolution == right.actual_resolution == (100, 100)
         assert '100×100' in right.status.get() and 'другое разрешение' in right.status.get()
         assert 'FPS: —' not in left.metrics.get() and 'FPS: —' not in right.metrics.get()
+        old_right_camera = cameras[1]
+        right.resolution.set('1920×1080')
+        right.apply_resolution()
+        wait_until(lambda: right.stream is not None and cameras.get(1) is not old_right_camera
+                   and len(right.frame_stats.timestamps) >= 2)
+        assert old_right_camera.released
+        assert cameras[1].properties[cv2.CAP_PROP_FRAME_WIDTH] == 1920
+        assert cameras[1].properties[cv2.CAP_PROP_FRAME_HEIGHT] == 1080
+        assert left.stream is streams[0]
+        streams = app.streams[:]
         right.index.set('0')
         right.open_camera()
         assert right.stream is streams[1] and left.stream is streams[0]

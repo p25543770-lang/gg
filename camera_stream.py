@@ -9,10 +9,9 @@ from edges import highlight_edges
 
 
 class CameraStream:
-    def __init__(self, index, capture_factory=None, manual_exposure=False, resolution=(640, 480)):
+    def __init__(self, index, capture_factory=None, resolution=(640, 480)):
         self.index = index
         self.capture_factory = capture_factory or cv2.VideoCapture
-        self.manual_exposure = manual_exposure
         self.resolution = resolution
         self.notice = ''
         self.lock = threading.Condition()
@@ -52,9 +51,6 @@ class CameraStream:
 
     def _capture(self):
         camera = None
-        old_auto = None
-        old_exposure = None
-        exposure_attempted = False
         try:
             camera = self.capture_factory(self.index, cv2.CAP_DSHOW if sys.platform == 'win32' else cv2.CAP_ANY)
             if not camera.isOpened():
@@ -65,21 +61,6 @@ class CameraStream:
             camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
             camera.set(cv2.CAP_PROP_FPS, 30)
             camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            if self.manual_exposure and sys.platform == 'win32':
-                # DirectShow uses 0.25 for manual and exposure -5 for ~1/32 s.
-                # Only change settings if the previous mode can be restored.
-                old_auto = camera.get(cv2.CAP_PROP_AUTO_EXPOSURE)
-                old_exposure = camera.get(cv2.CAP_PROP_EXPOSURE)
-                if old_auto not in (0.25, 0.75):
-                    self.notice = 'Не удалось прочитать режим экспозиции; оставлен текущий.'
-                else:
-                    exposure_attempted = True
-                    manual_ok = camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-                    exposure_ok = camera.set(cv2.CAP_PROP_EXPOSURE, -5) if manual_ok else False
-                    if not (manual_ok and exposure_ok):
-                        self.notice = 'Камера не приняла ручную экспозицию; FPS может быть ниже 30.'
-                        self._restore_exposure(camera, old_auto, old_exposure)
-                        exposure_attempted = False
             with self.lock:
                 if self.stopping:
                     return
@@ -108,20 +89,7 @@ class CameraStream:
                 self.lock.notify_all()
         finally:
             if camera is not None:
-                if exposure_attempted:
-                    self._restore_exposure(camera, old_auto, old_exposure)
                 camera.release()
-
-    @staticmethod
-    def _restore_exposure(camera, old_auto, old_exposure):
-        # Best effort: some drivers do not allow restoring properties on close.
-        try:
-            if old_auto == 0.25 and -20 <= old_exposure <= 0:
-                camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-                camera.set(cv2.CAP_PROP_EXPOSURE, old_exposure)
-            camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, old_auto)
-        except Exception:
-            pass
 
     def _process(self):
         last_seq = 0
