@@ -85,6 +85,27 @@ class StreamTests(unittest.TestCase):
             self.stop(*streams)
         self.assertTrue(fast.released and slow.released)
 
+    def test_requested_resolution_and_actual_capture_size(self):
+        camera = FakeCamera()
+        stream = CameraStream(0, lambda *_: camera, resolution=(1280, 720))
+        # Resize the preview but retain the original frame dimensions as metadata.
+        stream.configure(50, 32, 32)
+        stream.start()
+        try:
+            deadline = time.perf_counter() + 2
+            result = None
+            while result is None and time.perf_counter() < deadline:
+                _, result, _ = stream.poll()
+                time.sleep(0.005)
+            self.assertIsNotNone(result)
+            rgb, _, _, actual_resolution = result
+            self.assertEqual(camera.properties[cv2.CAP_PROP_FRAME_WIDTH], 1280)
+            self.assertEqual(camera.properties[cv2.CAP_PROP_FRAME_HEIGHT], 720)
+            self.assertEqual(actual_resolution, (64, 64))
+            self.assertEqual(rgb.shape[:2], (32, 32))
+        finally:
+            self.stop(stream)
+
     def test_manual_exposure_request_and_restoration_on_windows(self):
         camera = FakeCamera()
         with patch.object(camera_stream.sys, 'platform', 'win32'):

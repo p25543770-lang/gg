@@ -20,6 +20,8 @@ class CameraPanel(ttk.LabelFrame):
         self.app = app
         self.stream = None
         self.open_index = None
+        self.requested_resolution = None
+        self.actual_resolution = None
         self.timer = None
         self.photo = None
         self.frame_stats = FrameStats()
@@ -31,6 +33,13 @@ class CameraPanel(ttk.LabelFrame):
         ttk.Spinbox(controls, from_=0, to=20, width=4, textvariable=self.index).pack(side='left', padx=5)
         ttk.Button(controls, text='Открыть', command=self.open_camera).pack(side='left', padx=2)
         ttk.Button(controls, text='Закрыть', command=self.release).pack(side='left', padx=2)
+        resolution_controls = ttk.Frame(self)
+        resolution_controls.pack(fill='x', pady=(5, 0))
+        ttk.Label(resolution_controls, text='Разрешение:').pack(side='left')
+        self.resolution = tk.StringVar(value='640×480')
+        ttk.Combobox(resolution_controls, textvariable=self.resolution, width=12, state='readonly',
+                     values=('320×240', '640×480', '1280×720', '1920×1080')).pack(side='left', padx=5)
+        ttk.Label(resolution_controls, text='(применяется при открытии)').pack(side='left')
         self.manual_exposure = tk.BooleanVar(value=(sys.platform == 'win32'))
         ttk.Checkbutton(self, text='Экспозиция 1/32 с (при открытии, может затемнить)',
                         variable=self.manual_exposure,
@@ -60,7 +69,9 @@ class CameraPanel(ttk.LabelFrame):
             return
         self.release()
         self.open_index = index
-        self.stream = CameraStream(index, manual_exposure=self.manual_exposure.get())
+        self.requested_resolution = tuple(map(int, self.resolution.get().split('×')))
+        self.stream = CameraStream(index, manual_exposure=self.manual_exposure.get(),
+                                   resolution=self.requested_resolution)
         self.app.streams.append(self.stream)
         self.stream.start()
         self.status.set(f'Открытие камеры {index}…')
@@ -76,14 +87,22 @@ class CameraPanel(ttk.LabelFrame):
             self.release()
             self.status.set(state)
             return
-        if state == 'open':
-            self.status.set(f'Камера {self.open_index} открыта.' + (f' {notice}' if notice else ''))
         if result is not None:
-            rgb, started, acquired = result
+            rgb, started, acquired, self.actual_resolution = result
             self.photo = ImageTk.PhotoImage(Image.fromarray(rgb))
             self.preview.configure(image=self.photo, text='')
             self.frame_stats.add(started, acquired, time.perf_counter())
             self.metrics.set(self.frame_stats.text())
+        if state == 'open':
+            status = f'Камера {self.open_index} открыта.'
+            if self.actual_resolution:
+                w, h = self.actual_resolution
+                status += f' Кадр: {w}×{h}.'
+                if self.actual_resolution != self.requested_resolution:
+                    status += ' Камера выбрала другое разрешение.'
+            if notice:
+                status += f' {notice}'
+            self.status.set(status)
         # Keep the UI responsive and pick up the most recent processed frame.
         self.timer = self.app.root.after(10, self.update_frame)
 
@@ -95,6 +114,8 @@ class CameraPanel(ttk.LabelFrame):
             self.stream.stop()
             self.stream = None
         self.open_index = None
+        self.requested_resolution = None
+        self.actual_resolution = None
         self.preview.configure(image='', text='Камера не открыта')
         self.photo = None
         self.frame_stats.reset()
@@ -150,12 +171,14 @@ def self_test():
             self.index = index
             self.released = False
             self.fail_read = False
+            self.properties = {}
             cameras[index] = self
 
         def isOpened(self):
             return True
 
         def set(self, prop, value):
+            self.properties[prop] = value
             return True
 
         def get(self, prop):
@@ -188,11 +211,18 @@ def self_test():
     streams = []
     try:
         left, right = app.panels
+        right.resolution.set('1280×720')
         left.open_camera()
         right.open_camera()
         streams = app.streams[:]
         wait_until(lambda: len(left.frame_stats.timestamps) >= 2 and len(right.frame_stats.timestamps) >= 2)
         assert left.photo is not None and right.photo is not None
+        assert cameras[0].properties[cv2.CAP_PROP_FRAME_WIDTH] == 640
+        assert cameras[0].properties[cv2.CAP_PROP_FRAME_HEIGHT] == 480
+        assert cameras[1].properties[cv2.CAP_PROP_FRAME_WIDTH] == 1280
+        assert cameras[1].properties[cv2.CAP_PROP_FRAME_HEIGHT] == 720
+        assert left.actual_resolution == right.actual_resolution == (100, 100)
+        assert '100×100' in right.status.get() and 'другое разрешение' in right.status.get()
         assert 'FPS: —' not in left.metrics.get() and 'FPS: —' not in right.metrics.get()
         right.index.set('0')
         right.open_camera()

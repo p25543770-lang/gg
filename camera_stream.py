@@ -9,10 +9,11 @@ from edges import highlight_edges
 
 
 class CameraStream:
-    def __init__(self, index, capture_factory=None, manual_exposure=False):
+    def __init__(self, index, capture_factory=None, manual_exposure=False, resolution=(640, 480)):
         self.index = index
         self.capture_factory = capture_factory or cv2.VideoCapture
         self.manual_exposure = manual_exposure
+        self.resolution = resolution
         self.notice = ''
         self.lock = threading.Condition()
         self.stopping = False
@@ -60,8 +61,8 @@ class CameraStream:
                 raise RuntimeError('Не удалось открыть камеру. Попробуйте другой номер.')
             # Requests, not guarantees: camera, backend and USB bandwidth decide.
             camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-            camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
+            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
             camera.set(cv2.CAP_PROP_FPS, 30)
             camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             if self.manual_exposure and sys.platform == 'win32':
@@ -143,7 +144,7 @@ class CameraStream:
                 with self.lock:
                     if self.stopping:
                         return
-                    self.result = (rgb, started, acquired)
+                    self.result = (rgb, started, acquired, (w, h))
         except Exception:
             with self.lock:
                 if not self.stopping:
