@@ -20,7 +20,7 @@ py -3.12 -m pip install -r requirements-windows.txt
 py -3.12 -m PyInstaller --noconfirm --clean --onefile --windowed --name PurpleCorners app.py
 ```
 
-Результат — `dist\PurpleCorners.exe`. Python нужен только для сборки, а не для запуска готового файла. Workflow собирает его на Windows при push и pull request, а также запускается вручную через Actions. Для публикации предварительного релиза запустите workflow вручную на нужной ветке и укажите новый тег вида `purple-corners-v1.0.0`; файл добавится в GitHub Releases после успешной проверки.
+Результат — `dist\PurpleCorners.exe`. Python нужен только для сборки, а не для запуска готового файла. Workflow собирает его на Windows при push и pull request, а также запускается вручную через Actions. Для публикации предварительного релиза запустите workflow вручную на нужной ветке и укажите новый тег вида `purple-corners-v1.0.0`; файл добавится в GitHub Releases после успешной проверки. Также релиз публикуется при push с заголовком коммита `release: purple-corners-v1.0.0` (используйте новый тег).
 
 ## Запуск из исходного кода
 
