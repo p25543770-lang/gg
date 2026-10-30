@@ -1,5 +1,6 @@
 """Two live camera previews with purple object edges."""
 import sys
+import time
 import tkinter as tk
 from tkinter import ttk
 
@@ -7,6 +8,7 @@ import cv2
 from PIL import Image, ImageTk
 
 from edges import highlight_edges
+from frame_stats import FrameStats
 
 
 class CameraPanel(ttk.LabelFrame):
@@ -17,6 +19,7 @@ class CameraPanel(ttk.LabelFrame):
         self.open_index = None
         self.timer = None
         self.photo = None
+        self.frame_stats = FrameStats()
 
         controls = ttk.Frame(self)
         controls.pack(fill='x')
@@ -32,6 +35,8 @@ class CameraPanel(ttk.LabelFrame):
         preview_area.pack_propagate(False)
         self.preview = ttk.Label(preview_area, anchor='center', text='Нажмите «Открыть»')
         self.preview.pack(fill='both', expand=True)
+        self.metrics = tk.StringVar(value=self.frame_stats.text())
+        ttk.Label(self, textvariable=self.metrics).pack(fill='x', pady=(8, 0))
         self.status = tk.StringVar(value='Выберите номер камеры.')
         ttk.Label(self, textvariable=self.status, wraplength=450).pack(fill='x', pady=(8, 0))
 
@@ -63,6 +68,7 @@ class CameraPanel(ttk.LabelFrame):
         self.timer = None
         if self.camera is None:
             return
+        started = time.monotonic()
         ok, frame = self.camera.read()
         if not ok:
             self.release()
@@ -77,6 +83,8 @@ class CameraPanel(ttk.LabelFrame):
         frame = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))))
         self.photo = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
         self.preview.configure(image=self.photo, text='')
+        self.frame_stats.add(started, time.monotonic())
+        self.metrics.set(self.frame_stats.text())
         self.timer = self.app.root.after(30, self.update_frame)
 
     def release(self):
@@ -89,6 +97,8 @@ class CameraPanel(ttk.LabelFrame):
         self.open_index = None
         self.preview.configure(image='', text='Камера не открыта')
         self.photo = None
+        self.frame_stats.reset()
+        self.metrics.set(self.frame_stats.text())
         self.status.set('Камера закрыта.')
 
 
@@ -162,6 +172,14 @@ def self_test():
             assert tuple(camera.frame[50, 50]) == (255, 255, 255)
             assert np.any(np.all(camera.frame[20:30, 30:70] == (180, 0, 140), axis=2))
             assert panel.photo is not None and panel.timer is not None
+            assert len(panel.frame_stats.timestamps) == 1
+            assert 'FPS: —' in panel.metrics.get() and 'мс' in panel.metrics.get()
+        root.after_cancel(right.timer)
+        right.timer = None
+        right.update_frame()
+        assert len(right.frame_stats.timestamps) == 2
+        assert 'FPS: —' not in right.metrics.get()
+        assert len(left.frame_stats.timestamps) == 1
         # Refuse to open the same camera twice without disturbing either stream.
         right.index.set('0')
         right.open_camera()
@@ -172,7 +190,9 @@ def self_test():
         left_camera.fail_read = True
         left.update_frame()
         assert left_camera.released and left.camera is None
+        assert not left.frame_stats.timestamps and left.metrics.get() == left.frame_stats.text()
         assert right.camera is right_camera and right.timer is not None
+        assert len(right.frame_stats.timestamps) == 2
     finally:
         cv2.VideoCapture = original_capture
         app.close()
