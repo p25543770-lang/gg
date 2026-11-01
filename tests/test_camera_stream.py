@@ -120,6 +120,36 @@ class StreamTests(unittest.TestCase):
             self.stop(*streams)
         self.assertTrue(failed.released and good.released)
 
+    def test_snapshot_is_not_mutated_by_preview_edges(self):
+        class RectangleCamera(FakeCamera):
+            def read(self):
+                time.sleep(self.delay)
+                frame = np.zeros((64, 64, 3), dtype=np.uint8)
+                frame[16:48, 16:48] = 255
+                return True, frame
+
+        camera = RectangleCamera()
+        stream = CameraStream(0, lambda *_: camera)
+        stream.configure(100, 64, 64)
+        stream.start()
+        try:
+            deadline = time.perf_counter() + 2
+            processed = None
+            while processed is None and time.perf_counter() < deadline:
+                _, processed, _ = stream.poll()
+                time.sleep(0.005)
+            self.assertIsNotNone(processed)
+            snapshot = stream.snapshot()
+            self.assertIsNotNone(snapshot)
+            frame, _, sequence = snapshot
+            self.assertGreater(sequence, 0)
+            np.testing.assert_array_equal(frame[32, 32], (255, 255, 255))
+            np.testing.assert_array_equal(frame[0, 0], (0, 0, 0))
+            self.assertFalse(np.any(np.all(frame == (180, 0, 140), axis=2)))
+        finally:
+            self.stop(stream)
+            self.assertIsNone(stream.snapshot())
+
 
 if __name__ == '__main__':
     unittest.main()

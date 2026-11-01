@@ -9,6 +9,7 @@ from PIL import Image, ImageTk
 
 from camera_stream import CameraStream
 from frame_stats import FrameStats
+from stereo_ui import StereoPanel
 
 # Avoid oversubscribing CPU cores while two cameras process frames concurrently.
 cv2.setNumThreads(1)
@@ -73,6 +74,7 @@ class CameraPanel(ttk.LabelFrame):
         self.stream = CameraStream(index, resolution=self.requested_resolution)
         self.app.streams.append(self.stream)
         self.stream.start()
+        self.app.sync_stereo()
         self.status.set(f'Открытие камеры {index}…')
         self.update_frame()
 
@@ -144,13 +146,14 @@ class CameraPanel(ttk.LabelFrame):
         self.frame_stats.reset()
         self.metrics.set(self.frame_stats.text())
         self.status.set('Камера закрыта.')
+        self.app.sync_stereo()
 
 
 class CameraApp:
     def __init__(self, root):
         self.root = root
         self.streams = []
-        root.title('Камеры — фиолетовые контуры')
+        root.title('Камеры — фиолетовые контуры и стерео')
         root.protocol('WM_DELETE_WINDOW', self.close)
 
         controls = ttk.Frame(root, padding=10)
@@ -159,7 +162,11 @@ class CameraApp:
         self.sensitivity = tk.IntVar(value=50)
         ttk.Scale(controls, from_=1, to=100, variable=self.sensitivity, orient='horizontal').pack(side='left', fill='x', expand=True, padx=5)
 
-        views = ttk.Frame(root, padding=(10, 0, 10, 10))
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(fill='both', expand=True)
+        cameras_tab = ttk.Frame(self.notebook)
+        self.notebook.add(cameras_tab, text='Камеры и контуры')
+        views = ttk.Frame(cameras_tab, padding=(10, 0, 10, 10))
         views.pack(fill='both', expand=True)
         views.columnconfigure((0, 1), weight=1, uniform='cameras')
         views.rowconfigure(0, weight=1)
@@ -167,6 +174,13 @@ class CameraApp:
                        CameraPanel(views, self, 'Правая камера', 1)]
         for column, panel in enumerate(self.panels):
             panel.grid(row=0, column=column, sticky='nsew', padx=(0, 5) if column == 0 else (5, 0))
+        self.stereo = StereoPanel(self.notebook, self)
+        self.notebook.add(self.stereo, text='Стерео / глубина')
+        self.sync_stereo()
+
+    def sync_stereo(self):
+        if hasattr(self, 'stereo') and hasattr(self, 'panels'):
+            self.stereo.update_streams(self.panels[0].stream, self.panels[1].stream)
 
     def camera_busy(self, index):
         # A stopped capture may still be blocked in the driver; don't reopen it
@@ -177,6 +191,7 @@ class CameraApp:
     def close(self):
         for panel in self.panels:
             panel.release()
+        self.stereo.close()
         # Give capture threads a bounded chance to restore camera settings.
         for stream in self.streams:
             stream.capture_thread.join(timeout=0.5)
@@ -184,10 +199,14 @@ class CameraApp:
 
 
 def self_test():
-    """Exercise two asynchronous packaged previews without physical cameras."""
+    """Exercise two asynchronous packaged previews and stereo without physical cameras."""
     import numpy as np
 
+    from stereo import StereoCalibration, StereoSettings
+
     cameras = {}
+    texture = np.random.default_rng(42).integers(0, 256, (100, 140), dtype=np.uint8)
+    texture = cv2.GaussianBlur(texture, (3, 3), 0)
 
     class FakeCamera:
         def __init__(self, index, backend):
@@ -211,8 +230,10 @@ def self_test():
             time.sleep(0.02)
             if self.fail_read:
                 return False, None
-            frame = np.zeros((100, 100, 3), dtype=np.uint8)
-            frame[25:75, 25:75] = 255
+            # A textured synthetic stereo pair: the right image is shifted by
+            # 8 pixels, so a calibrated matcher should recover a finite depth.
+            offset = 20 + (8 if self.index == 1 else 0)
+            frame = cv2.cvtColor(texture[:, offset:offset + 100], cv2.COLOR_GRAY2BGR)
             return True, frame
 
         def release(self):
@@ -260,6 +281,27 @@ def self_test():
         right.index.set('0')
         right.open_camera()
         assert right.stream is streams[1] and left.stream is streams[0]
+
+        # Exercise the packaged stereo worker and tab with a synthetic disparity.
+        app.notebook.select(app.stereo)
+        k = np.array([[100.0, 0, 50], [0, 100.0, 50], [0, 0, 1]])
+        calibration = StereoCalibration(k, np.zeros(5), k, np.zeros(5), np.eye(3),
+                                        np.array([[-0.05], [0], [0]]), (100, 100))
+        app.stereo.worker.set_calibration(calibration)
+        app.stereo.worker.configure(StereoSettings(max_width=160, num_disparities=16,
+                                                   sync_tolerance_ms=100,
+                                                   min_depth_m=0.1, max_depth_m=5))
+        app.stereo.worker.set_enabled(True)
+        wait_until(lambda: app.stereo.worker.poll().result is not None)
+        wait_until(lambda: app.stereo.photo is not None)
+        stereo_result = app.stereo.worker.poll().result
+        assert stereo_result.depth_m is not None
+        median_depth = float(np.nanmedian(stereo_result.depth_m))
+        assert 0.4 < median_depth < 0.9, median_depth
+        assert stereo_result.baseline_m == 0.05
+        assert 'Стерео FPS' in app.stereo.metrics.get()
+        app.stereo.worker.set_enabled(False)
+
         cameras[0].fail_read = True
         wait_until(lambda: left.stream is None)
         assert not left.frame_stats.timestamps
@@ -286,6 +328,7 @@ if __name__ == '__main__':
             sys.exit(1)
         sys.exit(0)
     root = tk.Tk()
-    root.geometry('1200x650')
+    root.geometry('1280x860')
+    root.minsize(1100, 720)
     CameraApp(root)
     root.mainloop()

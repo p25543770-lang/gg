@@ -49,6 +49,18 @@ class CameraStream:
             result, self.result = self.result, None
             return self.state, result, self.notice
 
+    def snapshot(self):
+        """Latest untouched camera frame, acquisition time and sequence number.
+
+        The frame is shared read-only with callers; preview processing must copy
+        before drawing. Returns None until the camera is open and has a frame.
+        """
+        with self.lock:
+            if self.state != 'open' or self.stopping or self.raw is None:
+                return None
+            frame, _started, acquired = self.raw
+            return frame, acquired, self.sequence
+
     def _capture(self):
         camera = None
         try:
@@ -107,6 +119,10 @@ class CameraStream:
                 scale = min(width / w, height / h, 1)
                 if scale < 1:
                     frame = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+                else:
+                    # snapshots share the captured array; edge drawing must not
+                    # contaminate the stereo/calibration input.
+                    frame = frame.copy()
                 highlight_edges(frame, sensitivity)
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 with self.lock:
