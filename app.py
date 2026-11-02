@@ -1,4 +1,4 @@
-"""Two live camera previews with purple object edges."""
+"""Two live camera previews with edges, robot aid, wide panorama and stereo."""
 import sys
 import time
 import tkinter as tk
@@ -9,6 +9,7 @@ from PIL import Image, ImageTk
 
 from camera_stream import CameraStream
 from frame_stats import FrameStats
+from panorama_ui import PanoramaPanel
 from stereo_ui import StereoPanel
 
 # Avoid oversubscribing CPU cores while two cameras process frames concurrently.
@@ -154,7 +155,7 @@ class CameraApp:
     def __init__(self, root):
         self.root = root
         self.streams = []
-        root.title('Камеры — фиолетовые контуры и стерео')
+        root.title('Камеры — контуры, робот, панорама и стерео')
         root.protocol('WM_DELETE_WINDOW', self.close)
 
         controls = ttk.Frame(root, padding=10)
@@ -185,9 +186,13 @@ class CameraApp:
                        CameraPanel(views, self, 'Правая камера', 1)]
         for column, panel in enumerate(self.panels):
             panel.grid(row=0, column=column, sticky='nsew', padx=(0, 5) if column == 0 else (5, 0))
+        self.panorama = PanoramaPanel(self.notebook, self)
+        self.notebook.add(self.panorama, text='Общий вид / панорама')
         self.stereo = StereoPanel(self.notebook, self)
         self.notebook.add(self.stereo, text='Стерео / глубина')
-        self.sync_stereo()
+        self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
+        self.sync_views()
+        self._on_tab_changed()
 
     def vision_mode(self):
         return 'robot' if self.mode_label.get() == 'Дорога / препятствия' else 'edges'
@@ -202,9 +207,21 @@ class CameraApp:
                 panel.stream.configure(self.sensitivity.get(), panel.preview.winfo_width(), panel.preview.winfo_height(),
                                        mode=self.vision_mode())
 
+    def sync_views(self):
+        if hasattr(self, 'panels'):
+            left, right = self.panels[0].stream, self.panels[1].stream
+            if hasattr(self, 'stereo'):
+                self.stereo.update_streams(left, right)
+            if hasattr(self, 'panorama'):
+                self.panorama.update_streams(left, right)
+
     def sync_stereo(self):
-        if hasattr(self, 'stereo') and hasattr(self, 'panels'):
-            self.stereo.update_streams(self.panels[0].stream, self.panels[1].stream)
+        # Kept for existing camera-panel callbacks; now refreshes every shared view.
+        self.sync_views()
+
+    def _on_tab_changed(self, _event=None):
+        if hasattr(self, 'panorama') and hasattr(self, 'notebook'):
+            self.panorama.set_active(self.notebook.select() == str(self.panorama))
 
     def camera_busy(self, index):
         # A stopped capture may still be blocked in the driver; don't reopen it
@@ -215,6 +232,7 @@ class CameraApp:
     def close(self):
         for panel in self.panels:
             panel.release()
+        self.panorama.close()
         self.stereo.close()
         # Give capture threads a bounded chance to restore camera settings.
         for stream in self.streams:
@@ -226,6 +244,7 @@ def self_test():
     """Exercise two asynchronous packaged previews and stereo without physical cameras."""
     import numpy as np
 
+    from panorama import PanoramaCalibration, PanoramaSettings
     from stereo import StereoCalibration, StereoSettings
 
     cameras = {}
@@ -325,6 +344,25 @@ def self_test():
         assert stereo_result.baseline_m == 0.05
         assert 'Стерео FPS' in app.stereo.metrics.get()
         app.stereo.worker.set_enabled(False)
+
+        # Exercise the wide live view: unwarped side-by-side, then a fixed panorama.
+        app.notebook.select(app.panorama)
+        app.panorama.set_active(True)
+        app.panorama.worker.configure(PanoramaSettings(max_width=640, sync_tolerance_ms=100))
+        wait_until(lambda: app.panorama.worker.poll().result is not None)
+        wide = app.panorama.worker.poll().result
+        assert wide.view == 'side_by_side' and wide.image_size[0] > 100
+        wait_until(lambda: app.panorama.photo is not None)
+        panorama_calibration = PanoramaCalibration(
+            np.array([[1.0, 0, 8], [0, 1.0, 0], [0, 0, 1]]), (100, 100), (100, 100),
+            inliers=1, matches=1, rms_px=0.0,
+        )
+        app.panorama.worker.set_calibration(panorama_calibration)
+        app.panorama.worker.configure(PanoramaSettings(view='panorama', max_width=640, sync_tolerance_ms=100))
+        wait_until(lambda: (app.panorama.worker.poll().result is not None
+                            and app.panorama.worker.poll().result.view == 'panorama'))
+        assert app.panorama.worker.poll().result.image_size == (108, 100)
+        app.panorama.set_active(False)
 
         # Exercise the robot visual-aid mode without changing stereo snapshots.
         app.mode_label.set('Дорога / препятствия')
