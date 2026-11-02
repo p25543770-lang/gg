@@ -1,4 +1,4 @@
-"""Russian UI for stitching both cameras into one calibrated live panorama."""
+"""Russian UI for the combined wide preview: side-by-side or calibrated panorama."""
 from collections import deque
 import tkinter as tk
 from tkinter import filedialog, ttk
@@ -33,17 +33,11 @@ class PanoramaPanel(ttk.Frame):
         controls = ttk.Frame(self)
         controls.grid(row=0, column=0, sticky='ew', pady=(0, 8))
         ttk.Label(controls, text='Общий вид:').pack(side='left')
-        self.view = tk.StringVar(value='Панорама')
+        self.view = tk.StringVar(value='Рядом')
         self.view_box = ttk.Combobox(controls, textvariable=self.view, width=12, state='readonly',
                                      values=('Рядом', 'Панорама'))
         self.view_box.pack(side='left', padx=(5, 10))
         self.view_box.bind('<<ComboboxSelected>>', lambda _event: self._apply_settings())
-        ttk.Label(controls, text='Источник кадров:').pack(side='left')
-        self.source = tk.StringVar(value='Чистые кадры')
-        self.source_box = ttk.Combobox(controls, textvariable=self.source, width=20, state='readonly',
-                                       values=('Чистые кадры', 'Обработанные кадры'))
-        self.source_box.pack(side='left', padx=(5, 10))
-        self.source_box.bind('<<ComboboxSelected>>', lambda _event: self._apply_settings())
         self.calibrate_button = ttk.Button(controls, text='Настроить панораму', command=self._calibrate)
         self.calibrate_button.pack(side='left', padx=2)
         self.load_button = ttk.Button(controls, text='Загрузить…', command=self._load)
@@ -71,30 +65,27 @@ class PanoramaPanel(ttk.Frame):
         preview_area.grid(row=1, column=0, sticky='nsew')
         preview_area.pack_propagate(False)
         self.preview = ttk.Label(preview_area, anchor='center', background='black', foreground='white',
-                                 text='Откройте обе камеры на вкладке «Камеры и контуры».')
+                                 text='Откройте обе камеры на вкладке «Камеры».')
         self.preview.pack(fill='both', expand=True)
         preview_area.bind('<Configure>', self._on_resize)
 
         info = ttk.Frame(self)
         info.grid(row=3, column=0, sticky='ew', pady=(8, 0))
-        self.status = tk.StringVar(value='Откройте обе камеры на вкладке «Камеры и контуры».')
+        self.status = tk.StringVar(value='Откройте обе камеры на вкладке «Камеры».')
         ttk.Label(info, textvariable=self.status, wraplength=1100).pack(fill='x')
         self.metrics = tk.StringVar(value='Общий FPS: —  |  Обработка: —  |  Δt кадров: —  |  Кадр: —')
         ttk.Label(info, textvariable=self.metrics).pack(fill='x', pady=(4, 0))
-        self.calibration_info = tk.StringVar(value='Панорама не настроена: до настройки кадры показываются рядом.')
+        self.calibration_info = tk.StringVar(value='Панорама не настроена. Режим «Рядом» работает без настройки.')
         ttk.Label(info, textvariable=self.calibration_info, wraplength=1100).pack(fill='x', pady=(4, 0))
         self.notice = tk.StringVar(value='')
         ttk.Label(info, textvariable=self.notice, wraplength=1100).pack(fill='x', pady=(4, 0))
         ttk.Label(info, wraplength=1100, text=(
             'Панорама: закрепите камеры неподвижно, обеспечьте общее поле зрения и нажмите «Настроить панораму» '
-            'на текстурной сцене. «Чистые кадры» — как видит камера, «Обработанные кадры» — вместе со скелетом, '
-            'контурами или режимом робота; настройку панорамы при переключении повторять не нужно. '
-            'Близкие объекты на стыке могут двоиться из-за параллакса. '
+            'на текстурной сцене. Близкие объекты на стыке могут двоиться из-за параллакса. '
             'Это живой просмотр; запись видео не выполняется.'
         )).pack(fill='x', pady=(4, 0))
 
         self.worker.start()
-        self._apply_settings()
         self._poll()
 
     def update_streams(self, left, right):
@@ -118,7 +109,6 @@ class PanoramaPanel(ttk.Frame):
             max_width=int(self.max_width.get()),
             sync_tolerance_ms=float(self.sync_tolerance.get().replace(',', '.')),
             swap_cameras=bool(self.swap.get()),
-            source='processed' if self.source.get() == 'Обработанные кадры' else 'raw',
         )
 
     def _apply_settings(self):
@@ -168,7 +158,7 @@ class PanoramaPanel(ttk.Frame):
             self.full_window.lift()
             return
         window = tk.Toplevel(self)
-        window.title('Склейка камер — панорама')
+        window.title('Общий вид — камеры')
         window.configure(background='black')
         window.attributes('-fullscreen', True)
         window.bind('<Escape>', lambda _event: self._close_fullscreen())

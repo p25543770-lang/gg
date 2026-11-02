@@ -26,7 +26,6 @@ def translated_pair(width=480, height=360, shift=200):
 class FakeStream:
     def __init__(self, frame, timestamp=None, sequence=1):
         self.frame = frame
-        self.processed = None
         self.timestamp = time.perf_counter() if timestamp is None else timestamp
         self.sequence = sequence
         self.running = True
@@ -38,11 +37,6 @@ class FakeStream:
         if not self.running:
             return None
         return self.frame, self.timestamp, self.sequence
-
-    def snapshot_processed(self):
-        if not self.running or self.processed is None:
-            return None
-        return self.processed, self.timestamp, self.sequence
 
 
 class PanoramaCoreTests(unittest.TestCase):
@@ -88,27 +82,10 @@ class PanoramaCoreTests(unittest.TestCase):
         with self.assertRaisesRegex(PanoramaError, 'Мало деталей'):
             calibrate_panorama(frame, frame)
 
-    def test_render_follows_uniform_scaling_but_rejects_distortion(self):
-        """One calibration serves the raw frames and smaller processed frames.
-
-        Rendering from downscaled inputs must match rendering the full frames
-        and then downscaling the picture; a changed aspect ratio still demands
-        a fresh calibration.
-        """
+    def test_resolution_change_requires_new_calibration(self):
         left, right = translated_pair(shift=160)
-        # Low-frequency blobs keep the comparison robust to resampling jitter.
-        left = cv2.resize(cv2.resize(left, (60, 45), interpolation=cv2.INTER_AREA),
-                          (480, 360), interpolation=cv2.INTER_CUBIC)
-        right = cv2.resize(cv2.resize(right, (60, 45), interpolation=cv2.INTER_AREA),
-                           (480, 360), interpolation=cv2.INTER_CUBIC)
-        geometry = PanoramaGeometry(calibrate_panorama(left, right, PanoramaSettings(calibration_width=480)))
-        expected = cv2.resize(geometry.render(left, right), (320, 181), interpolation=cv2.INTER_AREA)
-        adapted = geometry.render(cv2.resize(left, (240, 180)), cv2.resize(right, (240, 180)))
-        self.assertEqual(adapted.shape, (181, 320, 3))
-        difference = np.abs(adapted.astype(np.int16) - expected.astype(np.int16)).mean()
-        self.assertLess(difference, 0.15 * float(expected.std()),
-                        f'scaled rendering drifted from the reference: {difference:.2f}')
-        # A different aspect ratio still demands a fresh calibration.
+        calibration = calibrate_panorama(left, right, PanoramaSettings(calibration_width=480))
+        geometry = PanoramaGeometry(calibration)
         with self.assertRaisesRegex(PanoramaError, 'Разрешение камер изменилось'):
             geometry.render(cv2.resize(left, (320, 240)), right)
 
@@ -186,60 +163,6 @@ class PanoramaWorkerTests(unittest.TestCase):
             right_stream.timestamp = time.perf_counter() - 1.0
             right_stream.sequence += 1
             self.wait_until(worker, lambda s: s.result is None and 'рассинхронизированы' in s.status)
-        finally:
-            worker.stop()
-            worker.thread.join(2)
-
-    def test_worker_switches_source_and_keeps_calibration(self):
-        """The processed-frames source must reuse the calibration, not reset it."""
-        left, right = translated_pair(width=320, height=240, shift=120)
-        now = time.perf_counter()
-        left_stream, right_stream = FakeStream(left, now), FakeStream(right, now)
-        # Any deterministic "overlay" frames: same geometry, different pixels.
-        left_stream.processed = cv2.flip(left, 1)
-        right_stream.processed = cv2.flip(right, 1)
-        worker = PanoramaWorker()
-        worker.set_streams(left_stream, right_stream)
-        worker.configure(PanoramaSettings(view='panorama', max_width=640, sync_tolerance_ms=100))
-        worker.set_calibration(calibrate_panorama(left, right, PanoramaSettings(calibration_width=320)))
-        worker.set_enabled(True)
-        worker.start()
-        try:
-            state = self.wait_until(worker, lambda s: s.result is not None
-                                    and s.result.view == 'panorama')
-            raw_stitch = state.result
-            worker.configure(PanoramaSettings(view='panorama', max_width=640,
-                                              sync_tolerance_ms=100, source='processed'))
-            state = self.wait_until(worker, lambda s: s.result is not None
-                                    and s.result.view == 'panorama'
-                                    and s.result.created_at > raw_stitch.created_at)
-            self.assertIsNotNone(state.calibration, 'calibration must survive the source switch')
-            self.assertFalse(state.result.fallback)
-            self.assertTrue(np.any(state.result.color_rgb != raw_stitch.color_rgb),
-                            'processed source must stitch overlay frames')
-        finally:
-            worker.stop()
-            worker.thread.join(2)
-        self.assertFalse(worker.alive())
-
-    def test_processed_source_waits_for_the_overlay_pass(self):
-        left, right = translated_pair(width=320, height=240, shift=120)
-        now = time.perf_counter()
-        left_stream, right_stream = FakeStream(left, now), FakeStream(right, now)
-        worker = PanoramaWorker()
-        worker.set_streams(left_stream, right_stream)
-        worker.configure(PanoramaSettings(view='panorama', max_width=640,
-                                          sync_tolerance_ms=100, source='processed'))
-        worker.set_enabled(True)
-        worker.start()
-        try:
-            # Raw frames exist but no processed frame yet: nothing is published.
-            state = self.wait_until(worker, lambda s: 'Ожидание' in s.status)
-            self.assertIsNone(state.result)
-            left_stream.processed, right_stream.processed = left, right
-            state = self.wait_until(worker, lambda s: s.result is not None)
-            # No calibration yet, so the panorama view degrades to side-by-side.
-            self.assertEqual(state.result.view, 'side_by_side')
         finally:
             worker.stop()
             worker.thread.join(2)
