@@ -27,7 +27,7 @@ jobs:
           architecture: x64
       - name: Install dependencies
         run: python -m pip install -r requirements-windows.txt
-      - name: Test camera, edge and stereo processing
+      - name: Test camera, edge, stereo and robot visual-aid processing
         run: python -m unittest discover -s tests -v
       - name: Build Windows executable
         run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name PurpleCorners app.py
@@ -66,5 +66,5 @@ jobs:
           if ($env:RELEASE_TAG -notmatch '^purple-corners-v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$') {
             throw 'Invalid release tag; expected e.g. purple-corners-v1.0.0'
           }
-          gh release create $env:RELEASE_TAG dist/PurpleCorners.exe --target $env:GITHUB_SHA --prerelease --title "Purple Corners for Windows $env:RELEASE_TAG" --notes "Windows x64. Two side-by-side camera previews with purple contrast edges, per-camera preview FPS and separate read and app timing, plus a stereo/depth tab with chessboard calibration, YAML/JSON calibration files, SGBM disparity and metric depth when the baseline unit is known. Choose and apply the resolution per camera; requests MJPEG at 30 FPS; actual speed depends on hardware. Stereo synchronization is software-based, not hardware-triggered. This is not road recognition, a certified rangefinder, or full scene-to-display latency. Download PurpleCorners.exe and double-click it; Python is not required. Packaged previews, stereo processing and synthetic frames were tested in GitHub Actions; physical cameras were not tested. Do not rely on it as a safety system."
+          gh release create $env:RELEASE_TAG dist/PurpleCorners.exe --target $env:GITHUB_SHA --prerelease --title "Purple Corners for Windows $env:RELEASE_TAG" --notes "Windows x64. Two side-by-side camera previews with purple contrast edges or a robot visual-aid mode (green estimated ground, red obstacle boxes/track IDs), per-camera preview FPS and separate read and app timing, plus a stereo/depth tab with chessboard calibration, YAML/JSON calibration files, SGBM disparity and metric depth when the baseline unit is known. Choose and apply the resolution per camera; requests MJPEG at 30 FPS; actual speed depends on hardware. Stereo synchronization is software-based, not hardware-triggered. Robot mode is an RGB heuristic, does not use Kinect depth, and is not a safety stop. Download PurpleCorners.exe and double-click it; Python is not required. Packaged previews, stereo processing and synthetic frames were tested in GitHub Actions; physical cameras were not tested. Do not rely on it as a safety system."
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

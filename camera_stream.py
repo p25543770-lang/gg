@@ -6,6 +6,7 @@ import time
 import cv2
 
 from edges import highlight_edges
+from robot_vision import RoadObstacleDetector, RobotSettings
 
 
 class CameraStream:
@@ -22,6 +23,10 @@ class CameraStream:
         self.result = None
         self.sensitivity = 50
         self.size = (640, 360)
+        self.mode = 'edges'
+        self.robot_settings = RobotSettings()
+        self._robot_reset = True
+        self.robot_detector = RoadObstacleDetector(self.robot_settings)
         self.capture_thread = threading.Thread(target=self._capture, daemon=True)
         self.process_thread = threading.Thread(target=self._process, daemon=True)
 
@@ -38,11 +43,19 @@ class CameraStream:
     def alive(self):
         return self.capture_thread.is_alive() or self.process_thread.is_alive()
 
-    def configure(self, sensitivity, width, height):
+    def configure(self, sensitivity, width, height, mode=None, robot_settings=None):
         with self.lock:
             self.sensitivity = sensitivity
             if width > 1 and height > 1:
                 self.size = (width, height)
+            if mode is not None and mode != self.mode:
+                if mode not in ('edges', 'robot'):
+                    raise ValueError('mode must be edges or robot')
+                self.mode = mode
+                self._robot_reset = True
+            if robot_settings is not None and robot_settings != self.robot_settings:
+                self.robot_settings = robot_settings
+                self._robot_reset = True
 
     def poll(self):
         with self.lock:
@@ -115,6 +128,9 @@ class CameraStream:
                     frame, started, acquired = self.raw
                     last_seq = self.sequence
                     sensitivity, (width, height) = self.sensitivity, self.size
+                    mode, robot_settings = self.mode, self.robot_settings
+                    robot_reset = self._robot_reset
+                    self._robot_reset = False
                 h, w = frame.shape[:2]
                 scale = min(width / w, height / h, 1)
                 if scale < 1:
@@ -123,7 +139,12 @@ class CameraStream:
                     # snapshots share the captured array; edge drawing must not
                     # contaminate the stereo/calibration input.
                     frame = frame.copy()
-                highlight_edges(frame, sensitivity)
+                if mode == 'robot':
+                    if robot_reset or self.robot_detector.settings != robot_settings:
+                        self.robot_detector = RoadObstacleDetector(robot_settings)
+                    frame, _robot_info = self.robot_detector.process(frame, sensitivity)
+                else:
+                    highlight_edges(frame, sensitivity)
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 with self.lock:
                     if self.stopping:

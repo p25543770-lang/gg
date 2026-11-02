@@ -82,7 +82,8 @@ class CameraPanel(ttk.LabelFrame):
         self.timer = None
         if self.stream is None:
             return
-        self.stream.configure(self.app.sensitivity.get(), self.preview.winfo_width(), self.preview.winfo_height())
+        self.stream.configure(self.app.sensitivity.get(), self.preview.winfo_width(), self.preview.winfo_height(),
+                              mode=self.app.vision_mode())
         state, result, notice = self.stream.poll()
         if state not in ('open', 'opening'):
             self.release()
@@ -158,9 +159,19 @@ class CameraApp:
 
         controls = ttk.Frame(root, padding=10)
         controls.pack(fill='x')
-        ttk.Label(controls, text='Чувствительность контуров (обе камеры):').pack(side='left')
+        ttk.Label(controls, text='Режим:').pack(side='left')
+        self.mode_label = tk.StringVar(value='Фиолетовые контуры')
+        self.mode_box = ttk.Combobox(controls, textvariable=self.mode_label, width=24, state='readonly',
+                                     values=('Фиолетовые контуры', 'Дорога / препятствия'))
+        self.mode_box.pack(side='left', padx=(5, 12))
+        self.mode_box.bind('<<ComboboxSelected>>', lambda _event: self.on_mode_changed())
+        ttk.Label(controls, text='Чувствительность (обе камеры):').pack(side='left')
         self.sensitivity = tk.IntVar(value=50)
         ttk.Scale(controls, from_=1, to=100, variable=self.sensitivity, orient='horizontal').pack(side='left', fill='x', expand=True, padx=5)
+        self.robot_hint = ttk.Label(root, padding=(10, 0, 10, 6),
+                                    text='Робот: зелёным — предполагаемый пол/дорога, красным — препятствия. Это визуальная подсказка, не аварийная система.')
+        self.robot_hint.pack(fill='x')
+        self.robot_hint.pack_forget()
 
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill='both', expand=True)
@@ -177,6 +188,19 @@ class CameraApp:
         self.stereo = StereoPanel(self.notebook, self)
         self.notebook.add(self.stereo, text='Стерео / глубина')
         self.sync_stereo()
+
+    def vision_mode(self):
+        return 'robot' if self.mode_label.get() == 'Дорога / препятствия' else 'edges'
+
+    def on_mode_changed(self):
+        if self.vision_mode() == 'robot':
+            self.robot_hint.pack(fill='x', before=self.notebook)
+        else:
+            self.robot_hint.pack_forget()
+        for panel in getattr(self, 'panels', []):
+            if panel.stream is not None:
+                panel.stream.configure(self.sensitivity.get(), panel.preview.winfo_width(), panel.preview.winfo_height(),
+                                       mode=self.vision_mode())
 
     def sync_stereo(self):
         if hasattr(self, 'stereo') and hasattr(self, 'panels'):
@@ -301,6 +325,18 @@ def self_test():
         assert stereo_result.baseline_m == 0.05
         assert 'Стерео FPS' in app.stereo.metrics.get()
         app.stereo.worker.set_enabled(False)
+
+        # Exercise the robot visual-aid mode without changing stereo snapshots.
+        app.mode_label.set('Дорога / препятствия')
+        app.on_mode_changed()
+        count = len(left.frame_stats.timestamps)
+        wait_until(lambda: len(left.frame_stats.timestamps) > count + 2)
+        assert left.photo is not None and right.photo is not None
+        snapshot = left.stream.snapshot()
+        assert snapshot is not None
+        assert not np.any(np.all(snapshot[0] == (0, 180, 0), axis=2))
+        app.mode_label.set('Фиолетовые контуры')
+        app.on_mode_changed()
 
         cameras[0].fail_read = True
         wait_until(lambda: left.stream is None)
