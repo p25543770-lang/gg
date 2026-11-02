@@ -27,15 +27,17 @@ jobs:
           architecture: x64
       - name: Install dependencies
         run: python -m pip install -r requirements-windows.txt
-      - name: Test camera, edge, stereo, robot and panorama processing
+      - name: Test camera, edge, robot and skeleton processing
         run: python -m unittest discover -s tests -v
       - name: Build Windows executable
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name PurpleCorners app.py
+        run: >-
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name PurpleCorners
+          --add-data "models;models" --add-data "assets;assets" app.py
       - name: Smoke-test packaged application (no camera required)
         shell: pwsh
         run: |
           $process = Start-Process -FilePath "$PWD\dist\PurpleCorners.exe" -ArgumentList '--self-test' -PassThru -RedirectStandardOutput test-out.txt -RedirectStandardError test-err.txt
-          if (-not $process.WaitForExit(120000)) {
+          if (-not $process.WaitForExit(240000)) {
             $process.Kill()
             throw 'Self-test timed out'
           }
@@ -66,5 +68,5 @@ jobs:
           if ($env:RELEASE_TAG -notmatch '^purple-corners-v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$') {
             throw 'Invalid release tag; expected e.g. purple-corners-v1.0.0'
           }
-          gh release create $env:RELEASE_TAG dist/PurpleCorners.exe --target $env:GITHUB_SHA --prerelease --title "Purple Corners for Windows $env:RELEASE_TAG" --notes "Windows x64. Two side-by-side camera previews with purple contrast edges or a robot visual-aid mode (green estimated ground, red obstacle boxes/track IDs), a wide live view tab with unwarped side-by-side or calibrated panorama stitching and fullscreen preview, per-camera preview FPS and separate read and app timing, plus a stereo/depth tab with chessboard calibration, YAML/JSON calibration files, SGBM disparity and metric depth when the baseline unit is known. Panorama calibration is saved separately from stereo calibration; nearby objects may double at the seam due to parallax. No video recording is included. Choose and apply the resolution per camera; requests MJPEG at 30 FPS; actual speed depends on hardware. Synchronization is software-based, not hardware-triggered. Robot mode is an RGB heuristic, does not use Kinect depth, and is not a safety stop. Download PurpleCorners.exe and double-click it; Python is not required. Packaged previews, stereo/panorama processing and synthetic frames were tested in GitHub Actions; physical cameras were not tested. Do not rely on it as a safety system."
+          gh release create $env:RELEASE_TAG dist/PurpleCorners.exe --target $env:GITHUB_SHA --prerelease --title "Purple Corners for Windows $env:RELEASE_TAG" --notes "Windows x64. One tab, two side-by-side camera previews, three modes: purple contrast edges, a robot visual aid (green estimated ground, red obstacle boxes with track IDs), and the new human skeleton mode. Skeleton mode draws 17 body keypoints and the limbs between them for every person in view, keeps a per-camera track ID and colour, and shows the number of people and the processing time under each preview. It runs fully offline on the CPU using two bundled ONNX models (NanoDet-Plus-m Apache-2.0 for person detection and RTMPose-t Apache-2.0 for keypoints), so no internet, GPU, Python or extra runtime is required; expect a lower FPS than the edge mode. Settings: maximum number of people per frame and an optional bounding box. Sensitivity raises or lowers both the person and the keypoint thresholds. The panorama and stereo/depth tabs were removed from the interface; their modules remain in the source tree for reference but are no longer loaded. Per-camera preview FPS, read timing and app timing are unchanged; resolution is chosen and applied per camera, MJPEG at 30 FPS is requested and actual speed depends on hardware. No video recording is included. Skeleton output is a 2D pose estimate: it drifts with motion blur, occlusion, unusual poses and backlight, and it measures no distance. Robot mode remains an RGB heuristic and does not use Kinect depth. Download PurpleCorners.exe and double-click it. Packaged previews, robot mode, the bundled skeleton models and synthetic frames were tested in GitHub Actions; physical cameras were not tested. Do not rely on it as a safety system."
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

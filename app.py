@@ -1,4 +1,4 @@
-"""Two live camera previews with edges, robot aid, wide panorama and stereo."""
+"""Two live camera previews with purple edges, a robot aid and a human skeleton."""
 import sys
 import time
 import tkinter as tk
@@ -9,11 +9,25 @@ from PIL import Image, ImageTk
 
 from camera_stream import CameraStream
 from frame_stats import FrameStats
-from panorama_ui import PanoramaPanel
-from stereo_ui import StereoPanel
+from pose import PoseSettings, models_present
 
 # Avoid oversubscribing CPU cores while two cameras process frames concurrently.
 cv2.setNumThreads(1)
+
+MODE_LABELS = ('Фиолетовые контуры', 'Дорога / препятствия', 'Скелет человека')
+MODE_BY_LABEL = {
+    'Фиолетовые контуры': 'edges',
+    'Дорога / препятствия': 'robot',
+    'Скелет человека': 'skeleton',
+}
+MODE_HINTS = {
+    'edges': 'Контуры: фиолетовым выделяются перепады яркости. Чувствительность вправо — больше деталей и больше шума.',
+    'robot': 'Робот: зелёным — предполагаемый пол/дорога, красным — препятствия. Это визуальная подсказка, не аварийная система.',
+    'skeleton': ('Скелет: программа находит людей и рисует 17 точек тела и линии между ними. '
+                 'Работает без интернета на процессоре, поэтому FPS ниже, чем у контуров. '
+                 'Чувствительность вправо — находит больше людей и точек, но чаще ошибается. '
+                 'Это оценка позы, а не измерение и не датчик безопасности.'),
+}
 
 
 class CameraPanel(ttk.LabelFrame):
@@ -75,7 +89,6 @@ class CameraPanel(ttk.LabelFrame):
         self.stream = CameraStream(index, resolution=self.requested_resolution)
         self.app.streams.append(self.stream)
         self.stream.start()
-        self.app.sync_stereo()
         self.status.set(f'Открытие камеры {index}…')
         self.update_frame()
 
@@ -83,8 +96,10 @@ class CameraPanel(ttk.LabelFrame):
         self.timer = None
         if self.stream is None:
             return
+        mode = self.app.vision_mode()
         self.stream.configure(self.app.sensitivity.get(), self.preview.winfo_width(), self.preview.winfo_height(),
-                              mode=self.app.vision_mode())
+                              mode=mode,
+                              pose_settings=self.app.pose_settings() if mode == 'skeleton' else None)
         state, result, notice = self.stream.poll()
         if state not in ('open', 'opening'):
             self.release()
@@ -103,6 +118,10 @@ class CameraPanel(ttk.LabelFrame):
                 status += f' Кадр: {w}×{h}.'
                 if self.actual_resolution != self.requested_resolution:
                     status += ' Камера выбрала другое разрешение.'
+            if mode == 'skeleton':
+                info = self.stream.pose_info
+                if info is not None:
+                    status += f' Людей в кадре: {info.person_count}. Обработка: {info.inference_ms:.0f} мс.'
             if notice:
                 status += f' {notice}'
             if self.status.get() != status:
@@ -148,14 +167,13 @@ class CameraPanel(ttk.LabelFrame):
         self.frame_stats.reset()
         self.metrics.set(self.frame_stats.text())
         self.status.set('Камера закрыта.')
-        self.app.sync_stereo()
 
 
 class CameraApp:
     def __init__(self, root):
         self.root = root
         self.streams = []
-        root.title('Камеры — контуры, робот, панорама и стерео')
+        root.title('Камеры — контуры, робот, скелет человека')
         root.protocol('WM_DELETE_WINDOW', self.close)
 
         controls = ttk.Frame(root, padding=10)
@@ -163,16 +181,24 @@ class CameraApp:
         ttk.Label(controls, text='Режим:').pack(side='left')
         self.mode_label = tk.StringVar(value='Фиолетовые контуры')
         self.mode_box = ttk.Combobox(controls, textvariable=self.mode_label, width=24, state='readonly',
-                                     values=('Фиолетовые контуры', 'Дорога / препятствия'))
+                                     values=tuple(MODE_LABELS))
         self.mode_box.pack(side='left', padx=(5, 12))
         self.mode_box.bind('<<ComboboxSelected>>', lambda _event: self.on_mode_changed())
         ttk.Label(controls, text='Чувствительность (обе камеры):').pack(side='left')
         self.sensitivity = tk.IntVar(value=50)
         ttk.Scale(controls, from_=1, to=100, variable=self.sensitivity, orient='horizontal').pack(side='left', fill='x', expand=True, padx=5)
-        self.robot_hint = ttk.Label(root, padding=(10, 0, 10, 6),
-                                    text='Робот: зелёным — предполагаемый пол/дорога, красным — препятствия. Это визуальная подсказка, не аварийная система.')
-        self.robot_hint.pack(fill='x')
-        self.robot_hint.pack_forget()
+
+        self.skeleton_controls = ttk.Frame(root, padding=(10, 0, 10, 0))
+        ttk.Label(self.skeleton_controls, text='Скелет: макс. человек в кадре:').pack(side='left')
+        self.max_people = tk.IntVar(value=4)
+        ttk.Spinbox(self.skeleton_controls, from_=1, to=8, width=4, textvariable=self.max_people,
+                    command=self.on_pose_settings_changed).pack(side='left', padx=(5, 12))
+        self.draw_boxes = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.skeleton_controls, text='Рамка вокруг человека', variable=self.draw_boxes,
+                        command=self.on_pose_settings_changed).pack(side='left')
+
+        self.mode_hint = ttk.Label(root, padding=(10, 4, 10, 6), text=MODE_HINTS['edges'], wraplength=1200)
+        self.mode_hint.pack(fill='x')
 
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill='both', expand=True)
@@ -186,42 +212,40 @@ class CameraApp:
                        CameraPanel(views, self, 'Правая камера', 1)]
         for column, panel in enumerate(self.panels):
             panel.grid(row=0, column=column, sticky='nsew', padx=(0, 5) if column == 0 else (5, 0))
-        self.panorama = PanoramaPanel(self.notebook, self)
-        self.notebook.add(self.panorama, text='Общий вид / панорама')
-        self.stereo = StereoPanel(self.notebook, self)
-        self.notebook.add(self.stereo, text='Стерео / глубина')
-        self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
-        self.sync_views()
-        self._on_tab_changed()
+        self.on_mode_changed()
 
     def vision_mode(self):
-        return 'robot' if self.mode_label.get() == 'Дорога / препятствия' else 'edges'
+        return MODE_BY_LABEL.get(self.mode_label.get(), 'edges')
+
+    def pose_settings(self):
+        try:
+            max_people = int(self.max_people.get())
+        except (tk.TclError, ValueError):
+            max_people = 4
+        return PoseSettings(max_people=max(1, min(8, max_people)), draw_boxes=bool(self.draw_boxes.get()))
 
     def on_mode_changed(self):
-        if self.vision_mode() == 'robot':
-            self.robot_hint.pack(fill='x', before=self.notebook)
+        mode = self.vision_mode()
+        hint = MODE_HINTS[mode]
+        if mode == 'skeleton' and not models_present():
+            hint += ' Внимание: модели скелета не найдены — скачайте релиз заново.'
+        self.mode_hint.configure(text=hint)
+        if mode == 'skeleton':
+            self.skeleton_controls.pack(fill='x', before=self.mode_hint)
         else:
-            self.robot_hint.pack_forget()
+            self.skeleton_controls.pack_forget()
+        self._apply_to_streams()
+
+    def on_pose_settings_changed(self):
+        self._apply_to_streams()
+
+    def _apply_to_streams(self):
+        mode = self.vision_mode()
+        pose_settings = self.pose_settings() if mode == 'skeleton' else None
         for panel in getattr(self, 'panels', []):
             if panel.stream is not None:
                 panel.stream.configure(self.sensitivity.get(), panel.preview.winfo_width(), panel.preview.winfo_height(),
-                                       mode=self.vision_mode())
-
-    def sync_views(self):
-        if hasattr(self, 'panels'):
-            left, right = self.panels[0].stream, self.panels[1].stream
-            if hasattr(self, 'stereo'):
-                self.stereo.update_streams(left, right)
-            if hasattr(self, 'panorama'):
-                self.panorama.update_streams(left, right)
-
-    def sync_stereo(self):
-        # Kept for existing camera-panel callbacks; now refreshes every shared view.
-        self.sync_views()
-
-    def _on_tab_changed(self, _event=None):
-        if hasattr(self, 'panorama') and hasattr(self, 'notebook'):
-            self.panorama.set_active(self.notebook.select() == str(self.panorama))
+                                       mode=mode, pose_settings=pose_settings)
 
     def camera_busy(self, index):
         # A stopped capture may still be blocked in the driver; don't reopen it
@@ -232,8 +256,6 @@ class CameraApp:
     def close(self):
         for panel in self.panels:
             panel.release()
-        self.panorama.close()
-        self.stereo.close()
         # Give capture threads a bounded chance to restore camera settings.
         for stream in self.streams:
             stream.capture_thread.join(timeout=0.5)
@@ -241,21 +263,26 @@ class CameraApp:
 
 
 def self_test():
-    """Exercise two asynchronous packaged previews and stereo without physical cameras."""
+    """Exercise packaged previews, robot aid and skeleton mode without cameras."""
     import numpy as np
 
-    from panorama import PanoramaCalibration, PanoramaSettings
-    from stereo import StereoCalibration, StereoSettings
+    from pose import PoseSettings, SkeletonDetector, resource_path
 
     cameras = {}
     texture = np.random.default_rng(42).integers(0, 256, (100, 140), dtype=np.uint8)
     texture = cv2.GaussianBlur(texture, (3, 3), 0)
+    # A real photograph ships with the app so the packaged ONNX models are
+    # exercised end to end, not just imported.
+    sample = cv2.imread(resource_path('assets', 'pose_sample.jpg'))
+    assert sample is not None, 'bundled pose sample is missing'
+    sample = cv2.resize(sample, (200, 200), interpolation=cv2.INTER_AREA)
 
     class FakeCamera:
         def __init__(self, index, backend):
             self.index = index
             self.released = False
             self.fail_read = False
+            self.show_person = False
             self.properties = {}
             cameras[index] = self
 
@@ -273,8 +300,8 @@ def self_test():
             time.sleep(0.02)
             if self.fail_read:
                 return False, None
-            # A textured synthetic stereo pair: the right image is shifted by
-            # 8 pixels, so a calibrated matcher should recover a finite depth.
+            if self.show_person:
+                return True, sample.copy()
             offset = 20 + (8 if self.index == 1 else 0)
             frame = cv2.cvtColor(texture[:, offset:offset + 100], cv2.COLOR_GRAY2BGR)
             return True, frame
@@ -282,13 +309,21 @@ def self_test():
         def release(self):
             self.released = True
 
-    def wait_until(predicate):
-        deadline = time.perf_counter() + 5
+    def wait_until(predicate, timeout=20):
+        deadline = time.perf_counter() + timeout
         while not predicate():
             root.update()
             if time.perf_counter() >= deadline:
                 raise AssertionError('Timed out waiting for camera preview')
             time.sleep(0.01)
+
+    def is_packed(widget):
+        # The self-test window is withdrawn, so winfo_ismapped() is always false.
+        try:
+            widget.pack_info()
+            return True
+        except tk.TclError:
+            return False
 
     root = tk.Tk()
     root.withdraw()
@@ -325,46 +360,7 @@ def self_test():
         right.open_camera()
         assert right.stream is streams[1] and left.stream is streams[0]
 
-        # Exercise the packaged stereo worker and tab with a synthetic disparity.
-        app.notebook.select(app.stereo)
-        k = np.array([[100.0, 0, 50], [0, 100.0, 50], [0, 0, 1]])
-        calibration = StereoCalibration(k, np.zeros(5), k, np.zeros(5), np.eye(3),
-                                        np.array([[-0.05], [0], [0]]), (100, 100))
-        app.stereo.worker.set_calibration(calibration)
-        app.stereo.worker.configure(StereoSettings(max_width=160, num_disparities=16,
-                                                   sync_tolerance_ms=100,
-                                                   min_depth_m=0.1, max_depth_m=5))
-        app.stereo.worker.set_enabled(True)
-        wait_until(lambda: app.stereo.worker.poll().result is not None)
-        wait_until(lambda: app.stereo.photo is not None)
-        stereo_result = app.stereo.worker.poll().result
-        assert stereo_result.depth_m is not None
-        median_depth = float(np.nanmedian(stereo_result.depth_m))
-        assert 0.4 < median_depth < 0.9, median_depth
-        assert stereo_result.baseline_m == 0.05
-        assert 'Стерео FPS' in app.stereo.metrics.get()
-        app.stereo.worker.set_enabled(False)
-
-        # Exercise the wide live view: unwarped side-by-side, then a fixed panorama.
-        app.notebook.select(app.panorama)
-        app.panorama.set_active(True)
-        app.panorama.worker.configure(PanoramaSettings(max_width=640, sync_tolerance_ms=100))
-        wait_until(lambda: app.panorama.worker.poll().result is not None)
-        wide = app.panorama.worker.poll().result
-        assert wide.view == 'side_by_side' and wide.image_size[0] > 100
-        wait_until(lambda: app.panorama.photo is not None)
-        panorama_calibration = PanoramaCalibration(
-            np.array([[1.0, 0, 8], [0, 1.0, 0], [0, 0, 1]]), (100, 100), (100, 100),
-            inliers=1, matches=1, rms_px=0.0,
-        )
-        app.panorama.worker.set_calibration(panorama_calibration)
-        app.panorama.worker.configure(PanoramaSettings(view='panorama', max_width=640, sync_tolerance_ms=100))
-        wait_until(lambda: (app.panorama.worker.poll().result is not None
-                            and app.panorama.worker.poll().result.view == 'panorama'))
-        assert app.panorama.worker.poll().result.image_size == (108, 100)
-        app.panorama.set_active(False)
-
-        # Exercise the robot visual-aid mode without changing stereo snapshots.
+        # Exercise the robot visual-aid mode without touching shared snapshots.
         app.mode_label.set('Дорога / препятствия')
         app.on_mode_changed()
         count = len(left.frame_stats.timestamps)
@@ -373,8 +369,38 @@ def self_test():
         snapshot = left.stream.snapshot()
         assert snapshot is not None
         assert not np.any(np.all(snapshot[0] == (0, 180, 0), axis=2))
+        # Exercise the packaged skeleton mode on a real person photograph.
+        detector = SkeletonDetector(PoseSettings(max_people=2))
+        _still, info = detector.process(sample, 50)
+        assert info.person_count >= 1, 'skeleton model found no person in the bundled sample'
+        assert info.people[0].keypoints.shape == (17, 3)
+        assert info.people[0].visible_keypoints >= 8
+
+        cameras[0].show_person = True
+        app.mode_label.set('Скелет человека')
+        app.on_mode_changed()
+        assert app.vision_mode() == 'skeleton' and is_packed(app.skeleton_controls)
+        count = len(left.frame_stats.timestamps)
+        wait_until(lambda: len(left.frame_stats.timestamps) > count + 2, timeout=40)
+        assert left.photo is not None
+        assert left.stream.mode == 'skeleton'
+        assert not left.stream.pose_error, left.stream.pose_error
+        wait_until(lambda: left.stream.pose_detector.settings.max_people == 4, timeout=20)
+        app.max_people.set(2)
+        app.draw_boxes.set(False)
+        app.on_pose_settings_changed()
+        wait_until(lambda: left.stream.pose_detector.settings.max_people == 2
+                   and not left.stream.pose_detector.settings.draw_boxes, timeout=20)
+        snapshot = left.stream.snapshot()
+        assert snapshot is not None
+        # The overlay must never contaminate the untouched camera frame.
+        assert not np.any(np.all(snapshot[0] == (0, 220, 0), axis=2))
+        cameras[0].show_person = False
         app.mode_label.set('Фиолетовые контуры')
         app.on_mode_changed()
+        assert not is_packed(app.skeleton_controls)
+        count = len(left.frame_stats.timestamps)
+        wait_until(lambda: len(left.frame_stats.timestamps) > count + 2)
 
         cameras[0].fail_read = True
         wait_until(lambda: left.stream is None)
