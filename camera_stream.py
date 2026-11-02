@@ -33,10 +33,8 @@ class CameraStream:
         self.pose_settings = PoseSettings()
         self._pose_reset = True
         self.pose_detector = SkeletonDetector(self.pose_settings)
-        self.robot_info = None
         self.pose_error = ''
         self.pose_info = None
-        self.processed_size = None
         self.capture_thread = threading.Thread(target=self._capture, daemon=True)
         self.process_thread = threading.Thread(target=self._process, daemon=True)
 
@@ -48,10 +46,6 @@ class CameraStream:
         with self.lock:
             self.stopping = True
             self.result = None
-            self.robot_info = None
-            self.pose_error = ''
-            self.pose_info = None
-            self.processed_size = None
             self.lock.notify_all()
 
     def alive(self):
@@ -165,11 +159,7 @@ class CameraStream:
                 if mode == 'robot':
                     if robot_reset or self.robot_detector.settings != robot_settings:
                         self.robot_detector = RoadObstacleDetector(robot_settings)
-                    frame, robot_info = self.robot_detector.process(frame, sensitivity)
-                    with self.lock:
-                        if self.stopping:
-                            return
-                        self.robot_info = robot_info
+                    frame, _robot_info = self.robot_detector.process(frame, sensitivity)
                 elif mode == 'skeleton':
                     if self.pose_detector.settings != pose_settings:
                         self.pose_detector = SkeletonDetector(pose_settings)
@@ -184,8 +174,6 @@ class CameraStream:
                         cv2.putText(frame, 'SKELETON MODEL UNAVAILABLE', (8, 24),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2, cv2.LINE_AA)
                     with self.lock:
-                        if self.stopping:
-                            return
                         self.pose_error, self.pose_info = error, pose_info
                 else:
                     highlight_edges(frame, sensitivity)
@@ -194,9 +182,6 @@ class CameraStream:
                     if self.stopping:
                         return
                     self.result = (rgb, started, acquired, (w, h))
-                    # Size of the processed frame the overlays drew into; the
-                    # ROS 2 export needs it to normalise pixel coordinates.
-                    self.processed_size = (w, h)
         except Exception:
             with self.lock:
                 if not self.stopping:
