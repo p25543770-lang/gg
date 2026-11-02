@@ -6,6 +6,10 @@ import time
 import cv2
 
 from edges import highlight_edges
+from pose import PoseModelError, SkeletonDetector, PoseSettings
+from robot_vision import RoadObstacleDetector, RobotSettings
+
+MODES = ('edges', 'robot', 'skeleton')
 
 
 class CameraStream:
@@ -22,6 +26,15 @@ class CameraStream:
         self.result = None
         self.sensitivity = 50
         self.size = (640, 360)
+        self.mode = 'edges'
+        self.robot_settings = RobotSettings()
+        self._robot_reset = True
+        self.robot_detector = RoadObstacleDetector(self.robot_settings)
+        self.pose_settings = PoseSettings()
+        self._pose_reset = True
+        self.pose_detector = SkeletonDetector(self.pose_settings)
+        self.pose_error = ''
+        self.pose_info = None
         self.capture_thread = threading.Thread(target=self._capture, daemon=True)
         self.process_thread = threading.Thread(target=self._process, daemon=True)
 
@@ -38,16 +51,43 @@ class CameraStream:
     def alive(self):
         return self.capture_thread.is_alive() or self.process_thread.is_alive()
 
-    def configure(self, sensitivity, width, height):
+    def configure(self, sensitivity, width, height, mode=None, robot_settings=None, pose_settings=None):
         with self.lock:
             self.sensitivity = sensitivity
             if width > 1 and height > 1:
                 self.size = (width, height)
+            if mode is not None and mode != self.mode:
+                if mode not in MODES:
+                    raise ValueError('mode must be one of ' + ', '.join(MODES))
+                self.mode = mode
+                self._robot_reset = True
+                self._pose_reset = True
+            if robot_settings is not None and robot_settings != self.robot_settings:
+                self.robot_settings = robot_settings
+                self._robot_reset = True
+            if pose_settings is not None and pose_settings != self.pose_settings:
+                self.pose_settings = pose_settings
+                self._pose_reset = True
 
     def poll(self):
         with self.lock:
             result, self.result = self.result, None
-            return self.state, result, self.notice
+            notice = self.notice
+            if self.mode == 'skeleton' and self.pose_error:
+                notice = (notice + ' ' + self.pose_error).strip()
+            return self.state, result, notice
+
+    def snapshot(self):
+        """Latest untouched camera frame, acquisition time and sequence number.
+
+        The frame is shared read-only with callers; preview processing must copy
+        before drawing. Returns None until the camera is open and has a frame.
+        """
+        with self.lock:
+            if self.state != 'open' or self.stopping or self.raw is None:
+                return None
+            frame, _started, acquired = self.raw
+            return frame, acquired, self.sequence
 
     def _capture(self):
         camera = None
@@ -103,11 +143,40 @@ class CameraStream:
                     frame, started, acquired = self.raw
                     last_seq = self.sequence
                     sensitivity, (width, height) = self.sensitivity, self.size
+                    mode, robot_settings = self.mode, self.robot_settings
+                    pose_settings = self.pose_settings
+                    robot_reset, pose_reset = self._robot_reset, self._pose_reset
+                    self._robot_reset = False
+                    self._pose_reset = False
                 h, w = frame.shape[:2]
                 scale = min(width / w, height / h, 1)
                 if scale < 1:
                     frame = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
-                highlight_edges(frame, sensitivity)
+                else:
+                    # snapshots share the captured array; edge drawing must not
+                    # contaminate the stereo/calibration input.
+                    frame = frame.copy()
+                if mode == 'robot':
+                    if robot_reset or self.robot_detector.settings != robot_settings:
+                        self.robot_detector = RoadObstacleDetector(robot_settings)
+                    frame, _robot_info = self.robot_detector.process(frame, sensitivity)
+                elif mode == 'skeleton':
+                    if self.pose_detector.settings != pose_settings:
+                        self.pose_detector = SkeletonDetector(pose_settings)
+                    elif pose_reset:
+                        self.pose_detector.reset()
+                    try:
+                        frame, pose_info = self.pose_detector.process(frame, sensitivity)
+                        error = ''
+                    except PoseModelError as exc:
+                        # Missing/corrupt model must not kill the preview.
+                        pose_info, error = None, str(exc)
+                        cv2.putText(frame, 'SKELETON MODEL UNAVAILABLE', (8, 24),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2, cv2.LINE_AA)
+                    with self.lock:
+                        self.pose_error, self.pose_info = error, pose_info
+                else:
+                    highlight_edges(frame, sensitivity)
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 with self.lock:
                     if self.stopping:

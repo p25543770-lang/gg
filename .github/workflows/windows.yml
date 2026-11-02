@@ -27,15 +27,22 @@ jobs:
           architecture: x64
       - name: Install dependencies
         run: python -m pip install -r requirements-windows.txt
-      - name: Test edge detection
+      - name: Test camera, edge, robot and skeleton processing
         run: python -m unittest discover -s tests -v
       - name: Build Windows executable
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name PurpleCorners app.py
+        run: >-
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name PurpleCorners
+          --add-data "models;models" --add-data "assets;assets"
+          --collect-binaries onnxruntime --hidden-import onnxruntime
+          --exclude-module sympy --exclude-module onnxruntime.training
+          --exclude-module onnxruntime.tools --exclude-module transformers
+          --exclude-module matplotlib --exclude-module scipy --exclude-module pandas
+          app.py
       - name: Smoke-test packaged application (no camera required)
         shell: pwsh
         run: |
           $process = Start-Process -FilePath "$PWD\dist\PurpleCorners.exe" -ArgumentList '--self-test' -PassThru -RedirectStandardOutput test-out.txt -RedirectStandardError test-err.txt
-          if (-not $process.WaitForExit(120000)) {
+          if (-not $process.WaitForExit(240000)) {
             $process.Kill()
             throw 'Self-test timed out'
           }
@@ -66,5 +73,5 @@ jobs:
           if ($env:RELEASE_TAG -notmatch '^purple-corners-v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$') {
             throw 'Invalid release tag; expected e.g. purple-corners-v1.0.0'
           }
-          gh release create $env:RELEASE_TAG dist/PurpleCorners.exe --target $env:GITHUB_SHA --prerelease --title "Purple Corners for Windows $env:RELEASE_TAG" --notes "Windows x64. Two side-by-side camera previews with purple contrast edges, per-camera preview FPS and separate read and app timing. Choose and apply the resolution per camera; requests MJPEG at 30 FPS; actual speed depends on hardware. This is not road recognition or full scene-to-display latency. Download PurpleCorners.exe and double-click it; Python is not required. Both packaged previews and synthetic frames were tested in GitHub Actions; a physical camera was not tested. Do not rely on it as a safety system."
+          gh release create $env:RELEASE_TAG dist/PurpleCorners.exe --target $env:GITHUB_SHA --prerelease --title "Purple Corners for Windows $env:RELEASE_TAG" --notes "Windows x64. Откат: блок «Экспорт для ROS 2» из выпуска 1.14.0 удалён, этот файл содержит программу без экспорта. В остальном как в версии 1.13.1: одна вкладка с двумя предпросмотрами и три режима — фиолетовые контуры, визуальный помощник для робота (зелёная дорога, красные препятствия с номерами) и скелет человека (17 точек тела, номер и цвет дорожки, число людей в кадре). Скелет ускорен: расчёт на ONNX Runtime с автоматическим откатом на OpenCV DNN, одна общая сессия на обе камеры, поиск людей раз в три кадра; около 90 FPS на одного человека и около 30 FPS на трёх при кадре 450×340 на двухъядерном процессоре. Всё считается локально на процессоре; интернет, GPU и Python не нужны. Запись видео не ведётся. Скелет — двумерная оценка позы, режим робота — эвристика по цветному изображению; ни то, ни другое не является системой безопасности. Скачайте PurpleCorners.exe и запустите двойным щелчком; файл не подписан, Windows может показать SmartScreen — нажмите «Подробнее» → «Выполнить в любом случае». Предпросмотры, режим робота, вложенные модели скелета и синтетические кадры проверены в GitHub Actions; настоящие камеры не тестировались."
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

@@ -1,4 +1,4 @@
-"""Two live camera previews with purple object edges."""
+"""Two live camera previews with purple edges, a robot aid and a human skeleton."""
 import sys
 import time
 import tkinter as tk
@@ -9,9 +9,25 @@ from PIL import Image, ImageTk
 
 from camera_stream import CameraStream
 from frame_stats import FrameStats
+from pose import PoseSettings, models_present
 
 # Avoid oversubscribing CPU cores while two cameras process frames concurrently.
 cv2.setNumThreads(1)
+
+MODE_LABELS = ('Фиолетовые контуры', 'Дорога / препятствия', 'Скелет человека')
+MODE_BY_LABEL = {
+    'Фиолетовые контуры': 'edges',
+    'Дорога / препятствия': 'robot',
+    'Скелет человека': 'skeleton',
+}
+MODE_HINTS = {
+    'edges': 'Контуры: фиолетовым выделяются перепады яркости. Чувствительность вправо — больше деталей и больше шума.',
+    'robot': 'Робот: зелёным — предполагаемый пол/дорога, красным — препятствия. Это визуальная подсказка, не аварийная система.',
+    'skeleton': ('Скелет: программа находит людей и рисует 17 точек тела и линии между ними. '
+                 'Работает без интернета на процессоре, поэтому FPS ниже, чем у контуров. '
+                 'Чувствительность вправо — находит больше людей и точек, но чаще ошибается. '
+                 'Это оценка позы, а не измерение и не датчик безопасности.'),
+}
 
 
 class CameraPanel(ttk.LabelFrame):
@@ -26,6 +42,8 @@ class CameraPanel(ttk.LabelFrame):
         self.reopen_timer = None
         self.photo = None
         self.frame_stats = FrameStats()
+        self._last_request = None
+        self._status_at = 0.0
 
         controls = ttk.Frame(self)
         controls.pack(fill='x')
@@ -80,7 +98,15 @@ class CameraPanel(ttk.LabelFrame):
         self.timer = None
         if self.stream is None:
             return
-        self.stream.configure(self.app.sensitivity.get(), self.preview.winfo_width(), self.preview.winfo_height())
+        mode = self.app.vision_mode()
+        width, height = self.preview.winfo_width(), self.preview.winfo_height()
+        settings = self.app.pose_settings() if mode == 'skeleton' else None
+        request = (self.app.sensitivity.get(), width, height, mode, settings)
+        if request != self._last_request:
+            # configure() takes the stream lock; only do it when something
+            # actually changed instead of on every UI tick.
+            self.stream.configure(*request[:3], mode=mode, pose_settings=settings)
+            self._last_request = request
         state, result, notice = self.stream.poll()
         if state not in ('open', 'opening'):
             self.release()
@@ -92,19 +118,31 @@ class CameraPanel(ttk.LabelFrame):
             self.preview.configure(image=self.photo, text='')
             self.frame_stats.add(started, acquired, time.perf_counter())
             self.metrics.set(self.frame_stats.text())
-        if state == 'open':
+        now = time.perf_counter()
+        if state == 'open' and now - self._status_at >= 0.25:
+            # Start throttling only once a frame has arrived, so the very first
+            # status line already reports the real camera resolution.
+            if self.actual_resolution is not None:
+                self._status_at = now
             status = f'Камера {self.open_index} открыта.'
             if self.actual_resolution:
                 w, h = self.actual_resolution
                 status += f' Кадр: {w}×{h}.'
                 if self.actual_resolution != self.requested_resolution:
                     status += ' Камера выбрала другое разрешение.'
+            if mode == 'skeleton':
+                info = self.stream.pose_info
+                if info is not None:
+                    status += (f' Людей в кадре: {info.person_count}.'
+                               f' Обработка: {info.inference_ms:.0f} мс.'
+                               f' Движок: {info.backend}.')
             if notice:
                 status += f' {notice}'
             if self.status.get() != status:
                 self.status.set(status)
-        # Keep the UI responsive and pick up the most recent processed frame.
-        self.timer = self.app.root.after(2, self.update_frame)
+        # 8 ms is well above the camera rate and keeps the Tk thread from
+        # competing with capture and inference for the stream lock.
+        self.timer = self.app.root.after(8, self.update_frame)
 
     def apply_resolution(self):
         if self.stream is None:
@@ -139,6 +177,8 @@ class CameraPanel(ttk.LabelFrame):
         self.open_index = None
         self.requested_resolution = None
         self.actual_resolution = None
+        self._last_request = None
+        self._status_at = 0.0
         self.preview.configure(image='', text='Камера не открыта')
         self.photo = None
         self.frame_stats.reset()
@@ -150,16 +190,40 @@ class CameraApp:
     def __init__(self, root):
         self.root = root
         self.streams = []
-        root.title('Камеры — фиолетовые контуры')
+        root.title('Камеры — контуры, робот, скелет человека')
         root.protocol('WM_DELETE_WINDOW', self.close)
 
         controls = ttk.Frame(root, padding=10)
         controls.pack(fill='x')
-        ttk.Label(controls, text='Чувствительность контуров (обе камеры):').pack(side='left')
+        ttk.Label(controls, text='Режим:').pack(side='left')
+        self.mode_label = tk.StringVar(value='Фиолетовые контуры')
+        self.mode_box = ttk.Combobox(controls, textvariable=self.mode_label, width=24, state='readonly',
+                                     values=tuple(MODE_LABELS))
+        self.mode_box.pack(side='left', padx=(5, 12))
+        self.mode_box.bind('<<ComboboxSelected>>', lambda _event: self.on_mode_changed())
+        ttk.Label(controls, text='Чувствительность (обе камеры):').pack(side='left')
         self.sensitivity = tk.IntVar(value=50)
         ttk.Scale(controls, from_=1, to=100, variable=self.sensitivity, orient='horizontal').pack(side='left', fill='x', expand=True, padx=5)
 
-        views = ttk.Frame(root, padding=(10, 0, 10, 10))
+        self.skeleton_controls = ttk.Frame(root, padding=(10, 0, 10, 0))
+        ttk.Label(self.skeleton_controls, text='Скелет: макс. человек в кадре:').pack(side='left')
+        self._pose_key = None
+        self._pose_settings = PoseSettings()
+        self.max_people = tk.IntVar(value=4)
+        ttk.Spinbox(self.skeleton_controls, from_=1, to=8, width=4, textvariable=self.max_people,
+                    command=self.on_pose_settings_changed).pack(side='left', padx=(5, 12))
+        self.draw_boxes = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.skeleton_controls, text='Рамка вокруг человека', variable=self.draw_boxes,
+                        command=self.on_pose_settings_changed).pack(side='left')
+
+        self.mode_hint = ttk.Label(root, padding=(10, 4, 10, 6), text=MODE_HINTS['edges'], wraplength=1200)
+        self.mode_hint.pack(fill='x')
+
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(fill='both', expand=True)
+        cameras_tab = ttk.Frame(self.notebook)
+        self.notebook.add(cameras_tab, text='Камеры и контуры')
+        views = ttk.Frame(cameras_tab, padding=(10, 0, 10, 10))
         views.pack(fill='both', expand=True)
         views.columnconfigure((0, 1), weight=1, uniform='cameras')
         views.rowconfigure(0, weight=1)
@@ -167,6 +231,44 @@ class CameraApp:
                        CameraPanel(views, self, 'Правая камера', 1)]
         for column, panel in enumerate(self.panels):
             panel.grid(row=0, column=column, sticky='nsew', padx=(0, 5) if column == 0 else (5, 0))
+        self.on_mode_changed()
+
+    def vision_mode(self):
+        return MODE_BY_LABEL.get(self.mode_label.get(), 'edges')
+
+    def pose_settings(self):
+        try:
+            max_people = int(self.max_people.get())
+        except (tk.TclError, ValueError):
+            max_people = 4
+        key = (max(1, min(8, max_people)), bool(self.draw_boxes.get()))
+        if key != self._pose_key:
+            self._pose_key = key
+            self._pose_settings = PoseSettings(max_people=key[0], draw_boxes=key[1])
+        return self._pose_settings
+
+    def on_mode_changed(self):
+        mode = self.vision_mode()
+        hint = MODE_HINTS[mode]
+        if mode == 'skeleton' and not models_present():
+            hint += ' Внимание: модели скелета не найдены — скачайте релиз заново.'
+        self.mode_hint.configure(text=hint)
+        if mode == 'skeleton':
+            self.skeleton_controls.pack(fill='x', before=self.mode_hint)
+        else:
+            self.skeleton_controls.pack_forget()
+        self._apply_to_streams()
+
+    def on_pose_settings_changed(self):
+        self._apply_to_streams()
+
+    def _apply_to_streams(self):
+        mode = self.vision_mode()
+        pose_settings = self.pose_settings() if mode == 'skeleton' else None
+        for panel in getattr(self, 'panels', []):
+            if panel.stream is not None:
+                panel.stream.configure(self.sensitivity.get(), panel.preview.winfo_width(), panel.preview.winfo_height(),
+                                       mode=mode, pose_settings=pose_settings)
 
     def camera_busy(self, index):
         # A stopped capture may still be blocked in the driver; don't reopen it
@@ -184,16 +286,26 @@ class CameraApp:
 
 
 def self_test():
-    """Exercise two asynchronous packaged previews without physical cameras."""
+    """Exercise packaged previews, robot aid and skeleton mode without cameras."""
     import numpy as np
 
+    from pose import PoseSettings, SkeletonDetector, resource_path
+
     cameras = {}
+    texture = np.random.default_rng(42).integers(0, 256, (100, 140), dtype=np.uint8)
+    texture = cv2.GaussianBlur(texture, (3, 3), 0)
+    # A real photograph ships with the app so the packaged ONNX models are
+    # exercised end to end, not just imported.
+    sample = cv2.imread(resource_path('assets', 'pose_sample.jpg'))
+    assert sample is not None, 'bundled pose sample is missing'
+    sample = cv2.resize(sample, (200, 200), interpolation=cv2.INTER_AREA)
 
     class FakeCamera:
         def __init__(self, index, backend):
             self.index = index
             self.released = False
             self.fail_read = False
+            self.show_person = False
             self.properties = {}
             cameras[index] = self
 
@@ -211,20 +323,30 @@ def self_test():
             time.sleep(0.02)
             if self.fail_read:
                 return False, None
-            frame = np.zeros((100, 100, 3), dtype=np.uint8)
-            frame[25:75, 25:75] = 255
+            if self.show_person:
+                return True, sample.copy()
+            offset = 20 + (8 if self.index == 1 else 0)
+            frame = cv2.cvtColor(texture[:, offset:offset + 100], cv2.COLOR_GRAY2BGR)
             return True, frame
 
         def release(self):
             self.released = True
 
-    def wait_until(predicate):
-        deadline = time.perf_counter() + 5
+    def wait_until(predicate, timeout=20):
+        deadline = time.perf_counter() + timeout
         while not predicate():
             root.update()
             if time.perf_counter() >= deadline:
                 raise AssertionError('Timed out waiting for camera preview')
             time.sleep(0.01)
+
+    def is_packed(widget):
+        # The self-test window is withdrawn, so winfo_ismapped() is always false.
+        try:
+            widget.pack_info()
+            return True
+        except tk.TclError:
+            return False
 
     root = tk.Tk()
     root.withdraw()
@@ -245,7 +367,8 @@ def self_test():
         assert cameras[1].properties[cv2.CAP_PROP_FRAME_WIDTH] == 1280
         assert cameras[1].properties[cv2.CAP_PROP_FRAME_HEIGHT] == 720
         assert left.actual_resolution == right.actual_resolution == (100, 100)
-        assert '100×100' in right.status.get() and 'другое разрешение' in right.status.get()
+        wait_until(lambda: '100×100' in right.status.get()
+                   and 'другое разрешение' in right.status.get(), timeout=20)
         assert 'FPS: —' not in left.metrics.get() and 'FPS: —' not in right.metrics.get()
         old_right_camera = cameras[1]
         right.resolution.set('1920×1080')
@@ -260,6 +383,58 @@ def self_test():
         right.index.set('0')
         right.open_camera()
         assert right.stream is streams[1] and left.stream is streams[0]
+
+        # Exercise the robot visual-aid mode without touching shared snapshots.
+        app.mode_label.set('Дорога / препятствия')
+        app.on_mode_changed()
+        count = len(left.frame_stats.timestamps)
+        wait_until(lambda: len(left.frame_stats.timestamps) > count + 2)
+        assert left.photo is not None and right.photo is not None
+        snapshot = left.stream.snapshot()
+        assert snapshot is not None
+        assert not np.any(np.all(snapshot[0] == (0, 180, 0), axis=2))
+        # Exercise the packaged skeleton mode on a real person photograph.
+        detector = SkeletonDetector(PoseSettings(max_people=2))
+        _still, info = detector.process(sample, 50)
+        assert info.person_count >= 1, 'skeleton model found no person in the bundled sample'
+        assert info.people[0].keypoints.shape == (17, 3)
+        assert info.people[0].visible_keypoints >= 8
+
+        cameras[0].show_person = True
+        app.mode_label.set('Скелет человека')
+        app.on_mode_changed()
+        assert app.vision_mode() == 'skeleton' and is_packed(app.skeleton_controls)
+        count = len(left.frame_stats.timestamps)
+        wait_until(lambda: len(left.frame_stats.timestamps) > count + 2, timeout=40)
+        assert left.photo is not None
+        assert left.stream.mode == 'skeleton'
+        assert not left.stream.pose_error, left.stream.pose_error
+        wait_until(lambda: left.stream.pose_info is not None
+                   and left.stream.pose_info.person_count >= 1, timeout=40)
+        backend = left.stream.pose_info.backend
+        print('skeleton backend:', backend, flush=True)
+        # A frozen build must bundle ONNX Runtime; a silent fall back to
+        # cv2.dnn would ship a three-times-slower exe without any test failing.
+        # Running from source on a platform without an ORT wheel is still fine.
+        if getattr(sys, 'frozen', False):
+            assert backend == 'ONNX Runtime', 'packaged build lost ONNX Runtime: ' + backend
+        wait_until(lambda: left.stream.pose_detector.settings.max_people == 4, timeout=20)
+        app.max_people.set(2)
+        app.draw_boxes.set(False)
+        app.on_pose_settings_changed()
+        wait_until(lambda: left.stream.pose_detector.settings.max_people == 2
+                   and not left.stream.pose_detector.settings.draw_boxes, timeout=20)
+        snapshot = left.stream.snapshot()
+        assert snapshot is not None
+        # The overlay must never contaminate the untouched camera frame.
+        assert not np.any(np.all(snapshot[0] == (0, 220, 0), axis=2))
+        cameras[0].show_person = False
+        app.mode_label.set('Фиолетовые контуры')
+        app.on_mode_changed()
+        assert not is_packed(app.skeleton_controls)
+        count = len(left.frame_stats.timestamps)
+        wait_until(lambda: len(left.frame_stats.timestamps) > count + 2)
+
         cameras[0].fail_read = True
         wait_until(lambda: left.stream is None)
         assert not left.frame_stats.timestamps
@@ -286,6 +461,7 @@ if __name__ == '__main__':
             sys.exit(1)
         sys.exit(0)
     root = tk.Tk()
-    root.geometry('1200x650')
+    root.geometry('1280x860')
+    root.minsize(1100, 720)
     CameraApp(root)
     root.mainloop()
