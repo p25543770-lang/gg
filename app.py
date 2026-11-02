@@ -10,6 +10,7 @@ from PIL import Image, ImageTk
 from camera_stream import CameraStream
 from frame_stats import FrameStats
 from pose import PoseSettings, models_present
+from ros_export import TelemetrySender, build_payload, valid_host
 
 # Avoid oversubscribing CPU cores while two cameras process frames concurrently.
 cv2.setNumThreads(1)
@@ -219,6 +220,28 @@ class CameraApp:
         self.mode_hint = ttk.Label(root, padding=(10, 4, 10, 6), text=MODE_HINTS['edges'], wraplength=1200)
         self.mode_hint.pack(fill='x')
 
+        export = ttk.LabelFrame(root, text='Экспорт для ROS 2 (робот)', padding=(10, 4, 10, 8))
+        export.pack(fill='x')
+        self.export_enabled = tk.BooleanVar(value=False)
+        ttk.Checkbutton(export, text='Отправлять данные', variable=self.export_enabled,
+                        command=self.on_export_toggled).pack(side='left')
+        ttk.Label(export, text='IP робота:').pack(side='left', padx=(12, 2))
+        self.export_host = tk.StringVar(value='127.0.0.1')
+        ttk.Entry(export, textvariable=self.export_host, width=13).pack(side='left')
+        ttk.Label(export, text='Порт:').pack(side='left', padx=(12, 2))
+        self.export_port = tk.StringVar(value='7555')
+        ttk.Entry(export, textvariable=self.export_port, width=6).pack(side='left')
+        ttk.Label(export, text='Частота, Гц:').pack(side='left', padx=(12, 2))
+        self.export_rate = tk.IntVar(value=10)
+        ttk.Spinbox(export, from_=1, to=30, width=4, textvariable=self.export_rate,
+                    command=self.on_export_toggled).pack(side='left')
+        self.export_status = tk.StringVar(value='Выключено. На роботе запустите ros2_bridge.py — инструкция в README.')
+        ttk.Label(export, textvariable=self.export_status).pack(side='left', padx=(12, 0))
+        self._export_timer = None
+        self._export_sender = None
+        self._export_seq = {}
+        self._export_seen = None
+
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill='both', expand=True)
         cameras_tab = ttk.Frame(self.notebook)
@@ -270,6 +293,74 @@ class CameraApp:
                 panel.stream.configure(self.sensitivity.get(), panel.preview.winfo_width(), panel.preview.winfo_height(),
                                        mode=mode, pose_settings=pose_settings)
 
+    def on_export_toggled(self):
+        if self.export_enabled.get():
+            host = self.export_host.get().strip()
+            if not valid_host(host):
+                self.export_status.set('Неверный IP-адрес. Пример: 192.168.1.10')
+                self.export_enabled.set(False)
+                self._stop_export()
+                return
+            try:
+                port = int(self.export_port.get())
+                rate = max(1, min(30, int(self.export_rate.get())))
+            except ValueError:
+                self.export_status.set('Порт и частота должны быть целыми числами.')
+                self.export_enabled.set(False)
+                self._stop_export()
+                return
+            if not 1 <= port <= 65535:
+                self.export_status.set('Порт должен быть от 1 до 65535.')
+                self.export_enabled.set(False)
+                self._stop_export()
+                return
+            if self._export_sender is not None:
+                self._export_sender.close()
+            self._export_sender = TelemetrySender(host, port)
+            self.export_status.set(f'Отправка на {host}:{port}, {rate} Гц…')
+            self._export_tick(rate)
+        else:
+            self._stop_export()
+
+    def _stop_export(self):
+        if self._export_timer is not None:
+            self.root.after_cancel(self._export_timer)
+            self._export_timer = None
+        if self._export_sender is not None:
+            self._export_sender.close()
+            self._export_sender = None
+        self._export_seq = {}
+        self.export_status.set('Выключено. На роботе запустите ros2_bridge.py — инструкция в README.')
+
+    def _export_tick(self, rate):
+        self._export_timer = None
+        if not self.export_enabled.get() or self._export_sender is None:
+            return
+        mode = self.vision_mode()
+        for panel in self.panels:
+            stream = panel.stream
+            if stream is None or not stream.alive():
+                continue
+            with stream.lock:
+                frame_size = stream.processed_size
+                robot_info = stream.robot_info
+                pose_info = stream.pose_info
+            if frame_size is None:
+                continue
+            seq = self._export_seq.get(panel.open_index, 0) + 1
+            self._export_seq[panel.open_index] = seq
+            payload = build_payload(panel.open_index, mode, frame_size, seq,
+                                    robot_info=robot_info, pose_info=pose_info)
+            self._export_sender.send(payload)
+        sender = self._export_sender
+        if sender is not None:
+            seen = (sender.sent, sender.errors)
+            if seen != self._export_seen:
+                self._export_seen = seen
+                note = 'нет получателя (запущен ли ros2_bridge.py?)' if sender.errors else 'отправляется'
+                self.export_status.set(f'Пакетов: {sender.sent}. {note}.')
+        self._export_timer = self.root.after(max(33, 1000 // rate), self._export_tick, rate)
+
     def camera_busy(self, index):
         # A stopped capture may still be blocked in the driver; don't reopen it
         # until its owner thread has released the device.
@@ -279,6 +370,9 @@ class CameraApp:
     def close(self):
         for panel in self.panels:
             panel.release()
+        if self.export_enabled.get():
+            self.export_enabled.set(False)
+        self._stop_export()
         # Give capture threads a bounded chance to restore camera settings.
         for stream in self.streams:
             stream.capture_thread.join(timeout=0.5)
@@ -428,6 +522,38 @@ def self_test():
         assert snapshot is not None
         # The overlay must never contaminate the untouched camera frame.
         assert not np.any(np.all(snapshot[0] == (0, 220, 0), axis=2))
+        # The ROS 2 export must actually deliver the skeleton over UDP.
+        import json as _json
+        import socket as _socket
+        receiver = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        receiver.bind(('127.0.0.1', 0))
+        receiver.settimeout(2.0)
+        app.export_host.set('127.0.0.1')
+        app.export_port.set(str(receiver.getsockname()[1]))
+        app.export_rate.set(30)
+        cameras[0].show_person = True
+        app.export_enabled.set(True)
+        app.on_export_toggled()
+        packet = None
+        deadline = time.perf_counter() + 20
+        while time.perf_counter() < deadline:
+            root.update()
+            try:
+                packet = _json.loads(receiver.recv(65536).decode('utf-8'))
+            except _socket.timeout:
+                continue
+            if packet.get('mode') == 'skeleton' and packet.get('people'):
+                break
+            packet = None
+        receiver.close()
+        assert packet is not None and packet['people'], 'no skeleton packet over UDP'
+        person = packet['people'][0]
+        assert len(person['keypoints']) == 17 and len(person['keypoints'][0]) == 3
+        assert packet['frame']['w'] > 0 and packet['engine']
+        app.export_enabled.set(False)
+        app.on_export_toggled()
+        assert 'Выключено' in app.export_status.get()
+        cameras[0].show_person = False
         cameras[0].show_person = False
         app.mode_label.set('Фиолетовые контуры')
         app.on_mode_changed()

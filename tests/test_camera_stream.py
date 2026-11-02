@@ -150,6 +150,26 @@ class StreamTests(unittest.TestCase):
             self.stop(stream)
             self.assertIsNone(stream.snapshot())
 
+    def test_robot_mode_publishes_info_for_export(self):
+        camera = FakeCamera()
+        stream = CameraStream(0, lambda *_: camera)
+        stream.configure(50, 64, 64, mode='robot')
+        stream.start()
+        try:
+            deadline = time.perf_counter() + 2
+            info = size = None
+            while (info is None or size is None) and time.perf_counter() < deadline:
+                with stream.lock:
+                    info = stream.robot_info
+                    size = stream.processed_size
+                time.sleep(0.005)
+            self.assertIsNotNone(info, 'robot mode must publish RobotInfo for the exporter')
+            self.assertEqual(info.obstacle_count, len(info.tracks))
+            self.assertIsNotNone(size)
+        finally:
+            self.stop(stream)
+            self.assertIsNone(stream.robot_info)
+
 
 if __name__ == '__main__':
     unittest.main()
