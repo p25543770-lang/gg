@@ -38,6 +38,7 @@ class PanoramaSettings:
     calibration_width: int = 800
     sync_tolerance_ms: float = 66.0
     swap_cameras: bool = False
+    source: str = 'raw'
 
     def __post_init__(self):
         if self.view not in ('side_by_side', 'panorama'):
@@ -50,6 +51,8 @@ class PanoramaSettings:
             raise PanoramaError('Допуск синхронизации должен быть от 5 до 250 мс.')
         if not isinstance(self.swap_cameras, bool):
             raise PanoramaError('Неверный параметр порядка камер.')
+        if self.source not in ('raw', 'processed'):
+            raise PanoramaError('Источник кадров должен быть «Чистые кадры» или «Обработанные кадры».')
 
 
 @dataclass(frozen=True)
@@ -219,6 +222,7 @@ class PanoramaGeometry:
         self.left_matrix = transform
         self.right_matrix = transform @ calibration.homography
         self.left_size, self.right_size = calibration.left_size, calibration.right_size
+        self._scaled_cache = {}
         white = (np.full((h, w), 255, np.uint8) for w, h in (self.left_size, self.right_size))
         self.left_mask = cv2.warpPerspective(next(white), self.left_matrix, self.image_size,
                                             flags=cv2.INTER_NEAREST) > 0
@@ -241,20 +245,82 @@ class PanoramaGeometry:
             self.alpha = (dl / np.maximum(dl + dr, 1e-6)).astype(np.float32)[:, :, None]
             self.beta = 1.0 - self.alpha
 
+    def _scaled(self, factor, right_factor, size):
+        """Masks, feathering weights and warp matrices for a uniformly
+        downscaled canvas, computed lazily and cached per scale factor."""
+        cached = self._scaled_cache.get((factor, right_factor, size))
+        if cached is not None:
+            return cached
+        width, height = size
+        left_mask = cv2.resize(self.left_mask.astype(np.uint8), (width, height),
+                               interpolation=cv2.INTER_NEAREST) > 0
+        right_mask = cv2.resize(self.right_mask.astype(np.uint8), (width, height),
+                                interpolation=cv2.INTER_NEAREST) > 0
+        alpha = beta = None
+        overlap_box = None
+        overlap = left_mask & right_mask
+        if np.any(overlap):
+            ys, xs = np.where(overlap)
+            x0, y0 = int(xs.min()), int(ys.min())
+            x1, y1 = int(xs.max()) + 1, int(ys.max()) + 1
+            overlap_box = (y0, y1, x0, x1)
+            crop = overlap[y0:y1, x0:x1].astype(np.uint8)
+            padded = cv2.copyMakeBorder(crop, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+            weights = cv2.distanceTransform(padded, cv2.DIST_L2, 3)[1:-1, 1:-1].astype(np.float32)
+            alpha = weights[:, :, None]
+            beta = 1.0 - alpha
+        # The whole calibrated canvas shrinks by `factor`, while the smaller
+        # input is first mapped back to the calibrated geometry: forward(k) =
+        # diag(k) @ M @ diag(1/k). For k=1 this reduces to the cached original.
+        # The homogeneous row must stay 1: scale x and y only, otherwise the
+        # uniform diagonal cancels out and the mapping does not change.
+        shrink = np.diag([factor, factor, 1.0])
+        expand_left = np.diag([1.0 / factor, 1.0 / factor, 1.0])
+        expand_right = np.diag([1.0 / right_factor, 1.0 / right_factor, 1.0])
+        left_matrix = shrink @ self.left_matrix @ expand_left
+        right_matrix = shrink @ self.right_matrix @ expand_right
+        cached = (left_mask, right_mask, alpha, beta, overlap_box, left_matrix, right_matrix)
+        self._scaled_cache[(factor, right_factor, size)] = cached
+        return cached
+
     def render(self, left, right):
-        if _image_size(left) != self.left_size or _image_size(right) != self.right_size:
-            raise PanoramaError('Разрешение камер изменилось. Повторите настройку панорамы или загрузите настройку '
-                                'для текущего разрешения. Режим «Рядом» работает без настройки.')
-        warped_left = cv2.warpPerspective(left, self.left_matrix, self.image_size, flags=cv2.INTER_LINEAR)
-        warped_right = cv2.warpPerspective(right, self.right_matrix, self.image_size, flags=cv2.INTER_LINEAR)
+        left_size, right_size = _image_size(left), _image_size(right)
+        if left_size == self.left_size and right_size == self.right_size:
+            left_matrix = self.left_matrix
+            right_matrix = self.right_matrix
+            canvas = self.image_size
+            left_mask, right_mask = self.left_mask, self.right_mask
+            right_only = self.right_only
+            alpha, beta, overlap_box = self.alpha, self.beta, self.overlap_box
+        else:
+            # The same calibration serves clean camera frames and the smaller
+            # processed preview frames. Both sides must shrink uniformly; a
+            # changed aspect ratio still demands a fresh calibration.
+            factor = left_size[0] / self.left_size[0]
+            if (abs(factor * self.left_size[1] / left_size[1] - 1.0) > 0.02
+                    or not 0.05 <= factor <= 1.0):
+                raise PanoramaError('Разрешение камер изменилось. Повторите настройку панорамы или загрузите настройку '
+                                    'для текущего разрешения. Режим «Рядом» работает без настройки.')
+            right_factor = right_size[0] / self.right_size[0]
+            if (abs(right_factor / factor - 1.0) > 0.02
+                    or abs(right_factor * self.right_size[1] / right_size[1] - 1.0) > 0.02):
+                raise PanoramaError('Разрешение камер изменилось. Повторите настройку панорамы или загрузите настройку '
+                                    'для текущего разрешения. Режим «Рядом» работает без настройки.')
+            canvas = (max(1, int(round(self.image_size[0] * factor))),
+                      max(1, int(round(self.image_size[1] * factor))))
+            (left_mask, right_mask, alpha, beta,
+             overlap_box, left_matrix, right_matrix) = self._scaled(factor, right_factor, canvas)
+            right_only = right_mask & ~left_mask
+        warped_left = cv2.warpPerspective(left, left_matrix, canvas, flags=cv2.INTER_LINEAR)
+        warped_right = cv2.warpPerspective(right, right_matrix, canvas, flags=cv2.INTER_LINEAR)
         output = warped_left.copy()
-        output[self.right_only] = warped_right[self.right_only]
-        if self.overlap_box is not None:
-            y0, y1, x0, x1 = self.overlap_box
+        output[right_only] = warped_right[right_only]
+        if overlap_box is not None:
+            y0, y1, x0, x1 = overlap_box
             a, b = warped_left[y0:y1, x0:x1], warped_right[y0:y1, x0:x1]
-            blended = np.rint(a.astype(np.float32) * self.alpha + b.astype(np.float32) * self.beta).astype(np.uint8)
+            blended = np.rint(a.astype(np.float32) * alpha + b.astype(np.float32) * beta).astype(np.uint8)
             region = output[y0:y1, x0:x1]
-            both = self.left_mask[y0:y1, x0:x1] & self.right_mask[y0:y1, x0:x1]
+            both = left_mask[y0:y1, x0:x1] & right_mask[y0:y1, x0:x1]
             region[both] = blended[both]
         return output
 

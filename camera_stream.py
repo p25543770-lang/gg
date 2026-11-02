@@ -22,6 +22,7 @@ class CameraStream:
         self.stopping = False
         self.state = 'opening'
         self.raw = None
+        self.processed = None
         self.sequence = 0
         self.result = None
         self.sensitivity = 50
@@ -46,6 +47,7 @@ class CameraStream:
         with self.lock:
             self.stopping = True
             self.result = None
+            self.processed = None
             self.lock.notify_all()
 
     def alive(self):
@@ -88,6 +90,20 @@ class CameraStream:
                 return None
             frame, _started, acquired = self.raw
             return frame, acquired, self.sequence
+
+    def snapshot_processed(self):
+        """Latest processed frame (with the mode overlay), like snapshot().
+
+        Same (frame, acquisition time, sequence) shape as snapshot(); the frame
+        is shared read-only with callers. Returns None until the first frame
+        has been processed, which keeps panorama pairing in sync with the
+        camera sequence numbers.
+        """
+        with self.lock:
+            if self.state != 'open' or self.stopping or self.processed is None:
+                return None
+            frame, acquired, sequence = self.processed
+            return frame, acquired, sequence
 
     def _capture(self):
         camera = None
@@ -182,6 +198,7 @@ class CameraStream:
                     if self.stopping:
                         return
                     self.result = (rgb, started, acquired, (w, h))
+                    self.processed = (frame, acquired, last_seq)
         except Exception:
             with self.lock:
                 if not self.stopping:

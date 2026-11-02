@@ -150,6 +150,39 @@ class StreamTests(unittest.TestCase):
             self.stop(stream)
             self.assertIsNone(stream.snapshot())
 
+    def test_snapshot_processed_returns_latest_overlay_frame(self):
+        class RectangleCamera(FakeCamera):
+            def read(self):
+                time.sleep(self.delay)
+                frame = np.zeros((64, 64, 3), dtype=np.uint8)
+                frame[16:48, 16:48] = 255
+                return True, frame
+
+        camera = RectangleCamera()
+        stream = CameraStream(0, lambda *_: camera)
+        stream.configure(100, 64, 64)
+        stream.start()
+        try:
+            deadline = time.perf_counter() + 2
+            snapshot = None
+            while snapshot is None and time.perf_counter() < deadline:
+                snapshot = stream.snapshot_processed()
+                time.sleep(0.005)
+            self.assertIsNotNone(snapshot)
+            frame, _, sequence = snapshot
+            self.assertGreater(sequence, 0)
+            # The processed frame carries the edge overlay: on this synthetic
+            # scene the purple edge colour must be present.
+            self.assertTrue(np.any(np.all(frame == (180, 0, 140), axis=2)))
+            # The raw snapshot must stay untouched by the overlay pass, even
+            # though the camera may already be a frame ahead.
+            raw, _, raw_sequence = stream.snapshot()
+            self.assertGreaterEqual(raw_sequence, sequence)
+            self.assertFalse(np.any(np.all(raw == (180, 0, 140), axis=2)))
+        finally:
+            self.stop(stream)
+            self.assertIsNone(stream.snapshot_processed())
+
 
 if __name__ == '__main__':
     unittest.main()

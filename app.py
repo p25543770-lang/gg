@@ -1,4 +1,4 @@
-"""Two live camera previews with purple edges, a robot aid and a human skeleton."""
+"""Two live camera previews, a robot aid, a human skeleton and a stitched panorama."""
 import sys
 import time
 import tkinter as tk
@@ -9,6 +9,7 @@ from PIL import Image, ImageTk
 
 from camera_stream import CameraStream
 from frame_stats import FrameStats
+from panorama_ui import PanoramaPanel
 from pose import PoseSettings, models_present
 
 # Avoid oversubscribing CPU cores while two cameras process frames concurrently.
@@ -91,6 +92,7 @@ class CameraPanel(ttk.LabelFrame):
         self.stream = CameraStream(index, resolution=self.requested_resolution)
         self.app.streams.append(self.stream)
         self.stream.start()
+        self.app.sync_views()
         self.status.set(f'Открытие камеры {index}…')
         self.update_frame()
 
@@ -174,6 +176,7 @@ class CameraPanel(ttk.LabelFrame):
         if self.stream is not None:
             self.stream.stop()
             self.stream = None
+        self.app.sync_views()
         self.open_index = None
         self.requested_resolution = None
         self.actual_resolution = None
@@ -231,7 +234,22 @@ class CameraApp:
                        CameraPanel(views, self, 'Правая камера', 1)]
         for column, panel in enumerate(self.panels):
             panel.grid(row=0, column=column, sticky='nsew', padx=(0, 5) if column == 0 else (5, 0))
+        self.panorama = PanoramaPanel(self.notebook, self)
+        self.notebook.add(self.panorama, text='Склейка / панорама')
+        self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
+        self.sync_views()
+        self._on_tab_changed()
         self.on_mode_changed()
+
+    def sync_views(self):
+        # Publish the current stream pair to the stitching tab.
+        if hasattr(self, 'panels') and hasattr(self, 'panorama'):
+            self.panorama.update_streams(self.panels[0].stream, self.panels[1].stream)
+
+    def _on_tab_changed(self, _event=None):
+        # The panorama worker only burns CPU while its tab is visible.
+        if hasattr(self, 'panorama') and hasattr(self, 'notebook'):
+            self.panorama.set_active(self.notebook.select() == str(self.panorama))
 
     def vision_mode(self):
         return MODE_BY_LABEL.get(self.mode_label.get(), 'edges')
@@ -279,6 +297,8 @@ class CameraApp:
     def close(self):
         for panel in self.panels:
             panel.release()
+        if hasattr(self, 'panorama'):
+            self.panorama.close()
         # Give capture threads a bounded chance to restore camera settings.
         for stream in self.streams:
             stream.capture_thread.join(timeout=0.5)
@@ -289,6 +309,7 @@ def self_test():
     """Exercise packaged previews, robot aid and skeleton mode without cameras."""
     import numpy as np
 
+    from panorama import PanoramaCalibration, PanoramaSettings
     from pose import PoseSettings, SkeletonDetector, resource_path
 
     cameras = {}
@@ -434,6 +455,36 @@ def self_test():
         assert not is_packed(app.skeleton_controls)
         count = len(left.frame_stats.timestamps)
         wait_until(lambda: len(left.frame_stats.timestamps) > count + 2)
+
+        # Exercise the stitching tab: uncalibrated fallback, a fixed panorama,
+        # then the processed-frames source switch on the same calibration.
+        app.notebook.select(app.panorama)
+        app.panorama.set_active(True)
+        app.panorama.worker.configure(PanoramaSettings(max_width=640, sync_tolerance_ms=100))
+        wait_until(lambda: app.panorama.worker.poll().result is not None)
+        wide = app.panorama.worker.poll().result
+        assert wide.view == 'side_by_side' and wide.image_size[0] > 100
+        wait_until(lambda: app.panorama.photo is not None)
+        panorama_calibration = PanoramaCalibration(
+            np.array([[1.0, 0, 8], [0, 1.0, 0], [0, 0, 1]]), (100, 100), (100, 100),
+            inliers=1, matches=1, rms_px=0.0,
+        )
+        app.panorama.worker.set_calibration(panorama_calibration)
+        app.panorama.worker.configure(PanoramaSettings(view='panorama', max_width=640, sync_tolerance_ms=100))
+        wait_until(lambda: (app.panorama.worker.poll().result is not None
+                            and app.panorama.worker.poll().result.view == 'panorama'))
+        stitched = app.panorama.worker.poll().result
+        assert stitched.image_size == (108, 100)
+        app.panorama.worker.configure(PanoramaSettings(view='panorama', max_width=640,
+                                                       sync_tolerance_ms=100, source='processed'))
+        wait_until(lambda: (app.panorama.worker.poll().result is not None
+                            and app.panorama.worker.poll().result.view == 'panorama'
+                            and app.panorama.worker.poll().result.created_at > stitched.created_at))
+        processed_stitch = app.panorama.worker.poll().result
+        assert processed_stitch.image_size == (108, 100)
+        assert np.any(processed_stitch.color_rgb != stitched.color_rgb), \
+            'processed source must stitch the overlay frames'
+        app.panorama.set_active(False)
 
         cameras[0].fail_read = True
         wait_until(lambda: left.stream is None)

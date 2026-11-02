@@ -51,7 +51,7 @@ class PanoramaWorker:
         self._calibration = None
         self._geometry = None
         self._result = None
-        self._status = 'Откройте обе камеры на вкладке «Камеры».'
+        self._status = 'Откройте обе камеры на вкладке «Камеры и контуры».'
         self._notice = ''
         self._notice_id = 0
         self._busy = False
@@ -87,7 +87,7 @@ class PanoramaWorker:
                 return
             self._streams = streams
             self._invalidate(clear_calibration=True)
-            self._status = 'Откройте обе камеры на вкладке «Камеры».'
+            self._status = 'Откройте обе камеры на вкладке «Камеры и контуры».'
             self.lock.notify_all()
 
     def set_calibration(self, calibration):
@@ -107,6 +107,7 @@ class PanoramaWorker:
                 return
             swap_changed = settings.swap_cameras != self._settings.swap_cameras
             width_changed = settings.max_width != self._settings.max_width
+            source_changed = settings.source != self._settings.source
             self._settings = settings
             # Re-render the latest fresh pair after a view/size/sync change.
             self._result = None
@@ -116,6 +117,11 @@ class PanoramaWorker:
                 self._notify('Порядок камер изменён. Настройте панораму заново.')
             elif width_changed:
                 self._geometry = None
+            elif source_changed:
+                # The calibration keeps working: render() scales it to the
+                # preview-sized processed frames.
+                self._last_capture_pair = None
+                self._notify('Источник кадров изменён.')
             self.lock.notify_all()
 
     def set_enabled(self, enabled):
@@ -160,14 +166,22 @@ class PanoramaWorker:
                 self._status = message
                 self._result = None
 
-    def _fresh_pair(self, left_stream, right_stream, tolerance_ms, after=0.0, previous=None):
+    def _fetch_pair(self, left_stream, right_stream, settings):
+        """Snapshot both streams from the configured source, or (None, None)."""
+        if settings.source != 'processed':
+            return left_stream.snapshot(), right_stream.snapshot()
+        # Processed frames lag raw frames by one overlay pass; both vanish on
+        # stop, so the usual waiting and freshness checks stay valid.
+        return left_stream.snapshot_processed(), right_stream.snapshot_processed()
+
+    def _fresh_pair(self, left_stream, right_stream, tolerance_ms, after=0.0, previous=None, settings=None):
         if left_stream is None or right_stream is None:
-            self._waiting('Откройте левую и правую камеры на вкладке «Камеры».')
+            self._waiting('Откройте левую и правую камеры на вкладке «Камеры и контуры».')
             return None
         if not left_stream.alive() or not right_stream.alive():
             self._waiting('Одна из камер закрыта или завершилась. Откройте обе камеры заново.')
             return None
-        left, right = left_stream.snapshot(), right_stream.snapshot()
+        left, right = self._fetch_pair(left_stream, right_stream, settings or self._settings)
         if left is None or right is None:
             self._waiting('Ожидание первых кадров от обеих камер…')
             return None
@@ -229,6 +243,7 @@ class PanoramaWorker:
                     view='panorama', max_width=settings.max_width,
                     calibration_width=settings.calibration_width,
                     sync_tolerance_ms=settings.sync_tolerance_ms, swap_cameras=settings.swap_cameras,
+                    source=settings.source,
                 )
                 self._notify(f'Панорама настроена: {calibration.inliers} надёжных совпадений, '
                              f'ошибка {calibration.rms_px:.2f} px. Сохраните настройку, если камеры закреплены неподвижно.')
