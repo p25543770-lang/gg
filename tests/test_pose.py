@@ -6,9 +6,10 @@ import cv2
 import numpy as np
 
 from camera_stream import CameraStream
+import pose
 from pose import (
     KEYPOINT_NAMES, PoseModelError, PoseSettings, SkeletonDetector,
-    models_present, resource_path,
+    backend_name, models_present, resource_path,
 )
 
 cv2.setNumThreads(1)
@@ -35,7 +36,8 @@ class PoseSettingsTests(unittest.TestCase):
     def test_invalid_settings_rejected(self):
         for kwargs in ({'score_threshold': 0.0}, {'nms_threshold': 1.0}, {'max_people': 0},
                        {'max_people': 99}, {'smooth_alpha': 0.0}, {'max_missed_frames': -1},
-                       {'keypoint_threshold': 2.0}, {'min_box_pixels': 1}, {'detect_interval': 0}):
+                       {'keypoint_threshold': 2.0}, {'min_box_pixels': 1}, {'detect_interval': 0},
+                       {'max_people': 1.5}):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(ValueError):
                     PoseSettings(**kwargs)
@@ -182,6 +184,122 @@ class StreamSkeletonTests(unittest.TestCase):
             stream.capture_thread.join(5)
             stream.process_thread.join(5)
         self.assertFalse(stream.alive())
+
+
+@unittest.skipUnless(models_present(), 'skeleton models are not bundled')
+class PosePerformanceContractTests(unittest.TestCase):
+    """Guards for the optimisations that keep the preview smooth."""
+
+    def test_engines_are_shared_only_when_thread_safe(self):
+        first, second = SkeletonDetector(), SkeletonDetector()
+        first.load()
+        second.load()
+        if backend_name() == 'ONNX Runtime':
+            # ORT run() is thread-safe: one session serves every camera.
+            self.assertIs(first._detector, second._detector)
+            self.assertIs(first._pose, second._pose)
+        else:
+            # cv2.dnn is NOT thread-safe: each camera must own its networks.
+            self.assertIsNot(first._detector, second._detector)
+            self.assertIsNot(first._pose, second._pose)
+
+    def test_detector_runs_only_every_configured_interval(self):
+        settings = PoseSettings(detect_interval=4)
+        detector = SkeletonDetector(settings)
+        frame = sample_frame()
+        calls = []
+        detector.load()
+        original = detector._detector.forward
+
+        def counting(tensor, outputs=None):
+            calls.append(1)
+            return original(tensor, outputs)
+
+        detector._detector.forward = counting
+        try:
+            detections = [detector.process(frame, 50)[1].detected for _ in range(8)]
+        finally:
+            detector._detector.forward = original
+        self.assertEqual(detections, [True, False, False, False, True, False, False, False])
+        self.assertEqual(len(calls), 2)
+
+    def test_pose_network_runs_on_every_frame_even_when_static(self):
+        """A still picture must not freeze the joints: pose is never skipped."""
+        detector = SkeletonDetector(PoseSettings(detect_interval=3))
+        frame = sample_frame()
+        detector.process(frame, 50)
+        calls = []
+        original = detector._pose.forward
+
+        def counting(tensor, outputs=None):
+            calls.append(1)
+            return original(tensor, outputs)
+
+        detector._pose.forward = counting
+        try:
+            for _ in range(6):
+                _, info = detector.process(frame, 50)
+                self.assertEqual(len(info.people), 1)
+        finally:
+            detector._pose.forward = original
+        self.assertEqual(len(calls), 6)
+
+    def test_boxes_follow_measured_motion_between_detections(self):
+        detector = SkeletonDetector(PoseSettings(detect_interval=3, smooth_alpha=1.0))
+        frame = sample_frame()
+        _, info = detector.process(frame, 50)
+        start = info.people[0].bbox[0]
+        shifted = np.roll(frame, 12, axis=1)
+        _, info = detector.process(shifted, 50)
+        self.assertFalse(info.detected, 'second frame must reuse the carried box')
+        self.assertGreater(info.people[0].motion[0], 4.0, 'body motion was measured')
+        # The measured motion is applied to the box that feeds the NEXT frame.
+        self.assertGreater(detector._last_boxes[0][0][0], start + 4.0)
+
+    def test_carried_boxes_are_not_double_shifted_after_a_detection(self):
+        detector = SkeletonDetector(PoseSettings(detect_interval=1, smooth_alpha=1.0))
+        frame = sample_frame()
+        reference = detector.process(frame, 50)[1].people[0].bbox
+        for _ in range(4):
+            bbox = detector.process(frame, 50)[1].people[0].bbox
+        self.assertLess(abs(bbox[0] - reference[0]), 2.0)
+
+    def test_reset_clears_carried_boxes_and_tracks(self):
+        detector = SkeletonDetector()
+        detector.process(sample_frame(), 50)
+        self.assertTrue(detector._last_boxes)
+        detector.reset()
+        self.assertEqual(detector._last_boxes, [])
+        self.assertEqual(detector._tracks, [])
+
+    def test_input_frame_is_never_modified_by_reused_buffers(self):
+        detector = SkeletonDetector()
+        frame = sample_frame()
+        before = frame.copy()
+        for _ in range(5):
+            detector.process(frame, 50)
+        np.testing.assert_array_equal(frame, before)
+
+    def test_reported_backend_matches_the_loaded_engine(self):
+        detector = SkeletonDetector()
+        detector.load()
+        self.assertEqual(detector.backend, backend_name())
+        self.assertIn(detector.backend, ('ONNX Runtime', 'OpenCV DNN'))
+
+    def test_opencv_fallback_still_finds_the_person(self):
+        """The app must work when ONNX Runtime cannot be imported."""
+        saved = (pose._ORT, pose._ORT_CHECKED)
+        try:
+            pose._ORT, pose._ORT_CHECKED = None, True
+            detector = SkeletonDetector()
+            detector.load()
+            self.assertEqual(detector.backend, 'OpenCV DNN')
+            self.assertIsInstance(detector._detector, pose._DnnNet)
+            _, info = detector.process(sample_frame(), 50)
+            self.assertEqual(len(info.people), 1)
+            self.assertGreater(overlay_pixels(detector.process(sample_frame(), 50)[0]), 100)
+        finally:
+            pose._ORT, pose._ORT_CHECKED = saved
 
 
 if __name__ == '__main__':

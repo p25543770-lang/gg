@@ -42,6 +42,8 @@ class CameraPanel(ttk.LabelFrame):
         self.reopen_timer = None
         self.photo = None
         self.frame_stats = FrameStats()
+        self._last_request = None
+        self._status_at = 0.0
 
         controls = ttk.Frame(self)
         controls.pack(fill='x')
@@ -97,9 +99,14 @@ class CameraPanel(ttk.LabelFrame):
         if self.stream is None:
             return
         mode = self.app.vision_mode()
-        self.stream.configure(self.app.sensitivity.get(), self.preview.winfo_width(), self.preview.winfo_height(),
-                              mode=mode,
-                              pose_settings=self.app.pose_settings() if mode == 'skeleton' else None)
+        width, height = self.preview.winfo_width(), self.preview.winfo_height()
+        settings = self.app.pose_settings() if mode == 'skeleton' else None
+        request = (self.app.sensitivity.get(), width, height, mode, settings)
+        if request != self._last_request:
+            # configure() takes the stream lock; only do it when something
+            # actually changed instead of on every UI tick.
+            self.stream.configure(*request[:3], mode=mode, pose_settings=settings)
+            self._last_request = request
         state, result, notice = self.stream.poll()
         if state not in ('open', 'opening'):
             self.release()
@@ -111,7 +118,12 @@ class CameraPanel(ttk.LabelFrame):
             self.preview.configure(image=self.photo, text='')
             self.frame_stats.add(started, acquired, time.perf_counter())
             self.metrics.set(self.frame_stats.text())
-        if state == 'open':
+        now = time.perf_counter()
+        if state == 'open' and now - self._status_at >= 0.25:
+            # Start throttling only once a frame has arrived, so the very first
+            # status line already reports the real camera resolution.
+            if self.actual_resolution is not None:
+                self._status_at = now
             status = f'Камера {self.open_index} открыта.'
             if self.actual_resolution:
                 w, h = self.actual_resolution
@@ -121,13 +133,16 @@ class CameraPanel(ttk.LabelFrame):
             if mode == 'skeleton':
                 info = self.stream.pose_info
                 if info is not None:
-                    status += f' Людей в кадре: {info.person_count}. Обработка: {info.inference_ms:.0f} мс.'
+                    status += (f' Людей в кадре: {info.person_count}.'
+                               f' Обработка: {info.inference_ms:.0f} мс.'
+                               f' Движок: {info.backend}.')
             if notice:
                 status += f' {notice}'
             if self.status.get() != status:
                 self.status.set(status)
-        # Keep the UI responsive and pick up the most recent processed frame.
-        self.timer = self.app.root.after(2, self.update_frame)
+        # 8 ms is well above the camera rate and keeps the Tk thread from
+        # competing with capture and inference for the stream lock.
+        self.timer = self.app.root.after(8, self.update_frame)
 
     def apply_resolution(self):
         if self.stream is None:
@@ -162,6 +177,8 @@ class CameraPanel(ttk.LabelFrame):
         self.open_index = None
         self.requested_resolution = None
         self.actual_resolution = None
+        self._last_request = None
+        self._status_at = 0.0
         self.preview.configure(image='', text='Камера не открыта')
         self.photo = None
         self.frame_stats.reset()
@@ -190,6 +207,8 @@ class CameraApp:
 
         self.skeleton_controls = ttk.Frame(root, padding=(10, 0, 10, 0))
         ttk.Label(self.skeleton_controls, text='Скелет: макс. человек в кадре:').pack(side='left')
+        self._pose_key = None
+        self._pose_settings = PoseSettings()
         self.max_people = tk.IntVar(value=4)
         ttk.Spinbox(self.skeleton_controls, from_=1, to=8, width=4, textvariable=self.max_people,
                     command=self.on_pose_settings_changed).pack(side='left', padx=(5, 12))
@@ -222,7 +241,11 @@ class CameraApp:
             max_people = int(self.max_people.get())
         except (tk.TclError, ValueError):
             max_people = 4
-        return PoseSettings(max_people=max(1, min(8, max_people)), draw_boxes=bool(self.draw_boxes.get()))
+        key = (max(1, min(8, max_people)), bool(self.draw_boxes.get()))
+        if key != self._pose_key:
+            self._pose_key = key
+            self._pose_settings = PoseSettings(max_people=key[0], draw_boxes=key[1])
+        return self._pose_settings
 
     def on_mode_changed(self):
         mode = self.vision_mode()
@@ -344,7 +367,8 @@ def self_test():
         assert cameras[1].properties[cv2.CAP_PROP_FRAME_WIDTH] == 1280
         assert cameras[1].properties[cv2.CAP_PROP_FRAME_HEIGHT] == 720
         assert left.actual_resolution == right.actual_resolution == (100, 100)
-        assert '100×100' in right.status.get() and 'другое разрешение' in right.status.get()
+        wait_until(lambda: '100×100' in right.status.get()
+                   and 'другое разрешение' in right.status.get(), timeout=20)
         assert 'FPS: —' not in left.metrics.get() and 'FPS: —' not in right.metrics.get()
         old_right_camera = cameras[1]
         right.resolution.set('1920×1080')
@@ -385,6 +409,15 @@ def self_test():
         assert left.photo is not None
         assert left.stream.mode == 'skeleton'
         assert not left.stream.pose_error, left.stream.pose_error
+        wait_until(lambda: left.stream.pose_info is not None
+                   and left.stream.pose_info.person_count >= 1, timeout=40)
+        backend = left.stream.pose_info.backend
+        print('skeleton backend:', backend, flush=True)
+        # A frozen build must bundle ONNX Runtime; a silent fall back to
+        # cv2.dnn would ship a three-times-slower exe without any test failing.
+        # Running from source on a platform without an ORT wheel is still fine.
+        if getattr(sys, 'frozen', False):
+            assert backend == 'ONNX Runtime', 'packaged build lost ONNX Runtime: ' + backend
         wait_until(lambda: left.stream.pose_detector.settings.max_people == 4, timeout=20)
         app.max_people.set(2)
         app.draw_boxes.set(False)

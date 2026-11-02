@@ -1,7 +1,9 @@
 # Модели для режима «Скелет человека»
 
-Обе модели работают локально через `cv2.dnn`. Интернет, GPU, ONNX Runtime, PyTorch
-и TensorFlow не нужны — достаточно OpenCV, который уже входит в программу.
+Обе модели считаются локально на процессоре. По умолчанию используется ONNX
+Runtime (примерно втрое быстрее); если он недоступен, программа автоматически
+переходит на `cv2.dnn` из состава OpenCV. Интернет, GPU, PyTorch и TensorFlow не
+нужны. Активный движок показан в строке состояния под изображением.
 
 | Файл | Назначение | Вход | Выход | Размер |
 |---|---|---|---|---|
@@ -13,7 +15,11 @@
 - **NanoDet-Plus-m** — RangiLyu, <https://github.com/RangiLyu/nanodet>, лицензия
   Apache-2.0 (`licenses/NanoDet-Apache-2.0.txt`). Готовый ONNX-экспорт взят из
   открытого примера развёртывания <https://github.com/hpc203/nanodet-plus-opencv>
-  (`opencv/onnxmodel/nanodet-plus-m_320.onnx`).
+  (`opencv/onnxmodel/nanodet-plus-m_320.onnx`). В лежащей здесь копии из списка
+  входов графа удалены 260 записей, дублировавших веса (артефакт старого
+  экспортёра ONNX). Сами веса и структура вычислений не изменены — выходы
+  совпадают с исходным файлом с точностью 1.5e-05. Без этой правки ONNX Runtime
+  тратит время на лишние копии тензоров: 21.7 мс вместо 15.4 мс на кадр.
 - **RTMPose-t** — OpenMMLab, <https://github.com/open-mmlab/mmpose/tree/main/projects/rtmpose>,
   лицензия Apache-2.0 (`licenses/RTMPose-Apache-2.0.txt`). ONNX-экспорт
   стандартного `rtmpose-t simcc 256×192`; побайтово совпадающие копии опубликованы в
@@ -24,7 +30,7 @@
 Контрольные суммы SHA-256:
 
 ```
-4f12723cce3d48e47ca92cb925ba74d97a965c069208edca660bbb9f7ce2c610  nanodet_plus_m_320.onnx
+95690e7d59ecb20c57d614f33fd54ab2f84fcceb9002e707c5c85f298006b480  nanodet_plus_m_320.onnx
 f0d2822b63dc40d10143ae1f0f039aef7be3a43621657cfeaaa4a86d96d33bfc  rtmpose_t_256x192.onnx
 ```
 
